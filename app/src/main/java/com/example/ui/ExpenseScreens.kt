@@ -25,7 +25,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -3551,7 +3553,7 @@ fun ExportPDFDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                     expenses.filter { exp ->
                         exp.paidBy in selectedMembers ||
                         exp.splits.any { it.participantName in selectedMembers && it.isInvolved } ||
-                        (exp.isAllParticipants && group?.members?.any { it in selectedMembers } == true)
+                        (exp.splits.isEmpty() && exp.isAllParticipants && group?.members?.any { it in selectedMembers } == true)
                     }
                 }
                 val filteredTotal = filteredExpenses.sumOf { it.amount }
@@ -3730,13 +3732,16 @@ fun formatAmount(amount: Double): String {
 
 // Helper to determine who the expense involves
 fun getInvolvesText(expense: Expense, allMembers: List<String>): String {
-    if (expense.isAllParticipants) return "all"
-    val involved = expense.splits.filter { it.isInvolved }.map { it.participantName }
-    val uninvolved = expense.splits.filter { !it.isInvolved }.map { it.participantName }
+    val totalCount = if (allMembers.isNotEmpty()) allMembers.size else expense.splits.size
+    val involved = if (expense.splits.isNotEmpty()) {
+        expense.splits.filter { it.isInvolved }.map { it.participantName }
+    } else {
+        if (expense.isAllParticipants) allMembers else emptyList()
+    }
+
     return when {
         involved.isEmpty() -> "none"
-        involved.size == allMembers.size -> "all"
-        uninvolved.size == 1 -> "All except ${uninvolved.first()}"
+        totalCount > 0 && involved.size >= totalCount -> "all"
         else -> involved.joinToString(", ")
     }
 }
@@ -3958,7 +3963,7 @@ fun drawReportOnCanvas(
         expenses.filter { exp ->
             exp.paidBy in selectedList ||
             exp.splits.any { it.participantName in selectedList && it.isInvolved } ||
-            (exp.isAllParticipants && group?.members?.any { it in selectedList } == true)
+            (exp.splits.isEmpty() && exp.isAllParticipants && group?.members?.any { it in selectedList } == true)
         }
     }
 
@@ -4782,7 +4787,7 @@ fun WebReportPreviewScreen(viewModel: ExpenseViewModel) {
                 expenses.filter { exp ->
                     exp.paidBy == selectedParticipantFilter ||
                     exp.splits.any { it.participantName == selectedParticipantFilter && it.isInvolved } ||
-                    (exp.isAllParticipants && (group?.members?.contains(selectedParticipantFilter) == true))
+                    (exp.splits.isEmpty() && exp.isAllParticipants && (group?.members?.contains(selectedParticipantFilter) == true))
                 }
             }
 
@@ -5253,7 +5258,15 @@ fun AboutDeveloperScreen(viewModel: ExpenseViewModel) {
                     .padding(16.dp)
             ) {
                 Text(text = "App Version", fontSize = 12.sp, color = TextSecondary)
-                Text(text = "v2.0", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = RoyalBlue)
+                val versionName = remember {
+                    try {
+                        val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+                        pInfo.versionName ?: "3.1"
+                    } catch (e: Exception) {
+                        "3.1"
+                    }
+                }
+                Text(text = "v$versionName", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = RoyalBlue)
             }
         }
 
@@ -5623,12 +5636,15 @@ fun AddEditExpenseScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(SurfaceLight)
+            .navigationBarsPadding()
+            .imePadding()
     ) {
         // Top Custom Header
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(Color(0xFF808080)) // Gray color similar to Screenshot #3
+                .statusBarsPadding()
                 .padding(horizontal = 16.dp, vertical = 14.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
@@ -5966,6 +5982,9 @@ fun AddEditExpenseScreen(
                     Text("Delete Expense", fontWeight = FontWeight.Bold)
                 }
             }
+
+            // Extra bottom spacing so the last member card is never cramped or obscured
+            Spacer(modifier = Modifier.height(48.dp))
         }
     }
 }
