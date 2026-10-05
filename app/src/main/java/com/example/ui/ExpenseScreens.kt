@@ -998,16 +998,24 @@ fun MainExpenseAppScreen(
         }
         
         var subScreenState by remember { mutableStateOf(0) } // 0 = Landing Welcome, 1 = Email Form, 2 = Guest Form
+        val loginScrollState = rememberScrollState()
 
         Dialog(
             onDismissRequest = { /* Force account setup */ },
-            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+            properties = androidx.compose.ui.window.DialogProperties(
+                usePlatformDefaultWidth = false,
+                decorFitsSystemWindows = false
+            )
         ) {
             Surface(
                 modifier = Modifier.fillMaxSize(),
                 color = SurfaceLight
             ) {
-                Box(modifier = Modifier.fillMaxSize()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .imePadding()
+                ) {
                     // 1. Beautiful organic wave gradient header
                     Canvas(
                         modifier = Modifier
@@ -1035,47 +1043,56 @@ fun MainExpenseAppScreen(
                         )
                     }
 
-                    // 2. Stylized white wing logo & branding
+                    // 2. Scrollable container for branding & forms
                     Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 52.dp)
+                            .fillMaxSize()
+                            .statusBarsPadding()
+                            .navigationBarsPadding()
+                            .verticalScroll(loginScrollState),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Box(
+                        // Top branding logo
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier
-                                .size(64.dp)
-                                .background(Color.White.copy(alpha = 0.16f), CircleShape)
-                                .border(2.dp, Color.White, CircleShape),
-                            contentAlignment = Alignment.Center
+                                .fillMaxWidth()
+                                .padding(top = 36.dp, bottom = 20.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.CloudSync,
-                                contentDescription = "WeXpense Logo",
-                                tint = Color.White,
-                                modifier = Modifier.size(36.dp)
+                            Box(
+                                modifier = Modifier
+                                    .size(64.dp)
+                                    .background(Color.White.copy(alpha = 0.16f), CircleShape)
+                                    .border(2.dp, Color.White, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CloudSync,
+                                    contentDescription = "WeXpense Logo",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(36.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text(
+                                text = "WEXPENSE",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 21.sp,
+                                color = Color.White,
+                                letterSpacing = 2.5.sp
                             )
                         }
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Text(
-                            text = "WEXPENSE",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 21.sp,
-                            color = Color.White,
-                            letterSpacing = 2.5.sp
-                        )
-                    }
 
-                    // 3. Main Form / Bottom Section
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .align(Alignment.BottomCenter)
-                            .padding(bottom = 36.dp)
-                            .padding(horizontal = 24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
+                        // Main Form Section
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 24.dp)
+                                .padding(bottom = 24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
                         if (authInProgress) {
                             Spacer(modifier = Modifier.height(24.dp))
                             androidx.compose.material3.CircularProgressIndicator(color = RoyalBlue, modifier = Modifier.size(40.dp))
@@ -1271,6 +1288,64 @@ fun MainExpenseAppScreen(
                                         modifier = Modifier.padding(bottom = 6.dp)
                                     )
 
+                                    val handleAuthSubmit = {
+                                        val cleanUsername = authUsername.trim()
+                                        val cleanPassword = authPassword.trim()
+                                        if (cleanUsername.isBlank() || cleanPassword.isBlank()) {
+                                            Toast.makeText(context, "Please enter both username and password!", Toast.LENGTH_SHORT).show()
+                                        } else if (cleanPassword.length < 6) {
+                                            Toast.makeText(context, "Password must be at least 6 characters!", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            authInProgress = true
+                                            if (isSignUpMode) {
+                                                authStatusText = "Creating account on Supabase..."
+                                                com.example.supabase.SupabaseSyncManager.registerWithSupabase(cleanUsername, cleanPassword) { success, msg ->
+                                                    if (success) {
+                                                        val pseudoEmail = com.example.supabase.SupabaseSyncManager.toSafeEmail(cleanUsername)
+                                                        viewModel.loginWithCredentials(cleanUsername, pseudoEmail) {
+                                                            (context as? android.app.Activity)?.runOnUiThread {
+                                                                authInProgress = false
+                                                                Toast.makeText(context, "Account created successfully! Welcome $cleanUsername.", Toast.LENGTH_LONG).show()
+                                                                showCreateAccountDialog = false
+                                                            }
+                                                        }
+                                                    } else {
+                                                        (context as? android.app.Activity)?.runOnUiThread {
+                                                            authInProgress = false
+                                                            Toast.makeText(context, "Registration error: $msg", Toast.LENGTH_LONG).show()
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                authStatusText = "Authenticating with Supabase..."
+                                                com.example.supabase.SupabaseSyncManager.loginWithSupabase(cleanUsername, cleanPassword) { success, msg ->
+                                                    if (success) {
+                                                        val pseudoEmail = com.example.supabase.SupabaseSyncManager.toSafeEmail(cleanUsername)
+                                                        viewModel.loginWithCredentials(cleanUsername, pseudoEmail) {
+                                                            // Download and restore user backup from Supabase!
+                                                            viewModel.restoreDataFromSupabase(pseudoEmail) { restoreSuccess ->
+                                                                (context as? android.app.Activity)?.runOnUiThread {
+                                                                    authInProgress = false
+                                                                    if (restoreSuccess) {
+                                                                        Toast.makeText(context, "Welcome back $cleanUsername! Your data has been loaded.", Toast.LENGTH_LONG).show()
+                                                                    } else {
+                                                                        Toast.makeText(context, "Welcome $cleanUsername! No previous cloud data found.", Toast.LENGTH_LONG).show()
+                                                                    }
+                                                                    showCreateAccountDialog = false
+                                                                }
+                                                            }
+                                                        }
+                                                    } else {
+                                                        (context as? android.app.Activity)?.runOnUiThread {
+                                                            authInProgress = false
+                                                            Toast.makeText(context, "Login error: $msg", Toast.LENGTH_LONG).show()
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     Column(
                                         verticalArrangement = Arrangement.spacedBy(12.dp),
                                         modifier = Modifier.fillMaxWidth()
@@ -1282,6 +1357,9 @@ fun MainExpenseAppScreen(
                                             placeholder = { Text("Username") },
                                             modifier = Modifier.fillMaxWidth().testTag("auth_username_input"),
                                             singleLine = true,
+                                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                                imeAction = androidx.compose.ui.text.input.ImeAction.Next
+                                            ),
                                             shape = RoundedCornerShape(24.dp),
                                             colors = OutlinedTextFieldDefaults.colors(
                                                 focusedBorderColor = Color(0xFF4A00E0),
@@ -1299,6 +1377,13 @@ fun MainExpenseAppScreen(
                                             modifier = Modifier.fillMaxWidth().testTag("auth_password_input"),
                                             singleLine = true,
                                             visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                                keyboardType = androidx.compose.ui.text.input.KeyboardType.Password,
+                                                imeAction = androidx.compose.ui.text.input.ImeAction.Done
+                                            ),
+                                            keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                                                onDone = { handleAuthSubmit() }
+                                            ),
                                             shape = RoundedCornerShape(24.dp),
                                             colors = OutlinedTextFieldDefaults.colors(
                                                 focusedBorderColor = Color(0xFF4A00E0),
@@ -1312,63 +1397,7 @@ fun MainExpenseAppScreen(
 
                                         // Button: Login / Signup (Gradient)
                                         Button(
-                                            onClick = {
-                                                val cleanUsername = authUsername.trim()
-                                                val cleanPassword = authPassword.trim()
-                                                if (cleanUsername.isBlank() || cleanPassword.isBlank()) {
-                                                    Toast.makeText(context, "Please enter both username and password!", Toast.LENGTH_SHORT).show()
-                                                } else if (cleanPassword.length < 6) {
-                                                    Toast.makeText(context, "Password must be at least 6 characters!", Toast.LENGTH_SHORT).show()
-                                                } else {
-                                                    authInProgress = true
-                                                    if (isSignUpMode) {
-                                                        authStatusText = "Creating account on Supabase..."
-                                                        com.example.supabase.SupabaseSyncManager.registerWithSupabase(cleanUsername, cleanPassword) { success, msg ->
-                                                            if (success) {
-                                                                val pseudoEmail = com.example.supabase.SupabaseSyncManager.toSafeEmail(cleanUsername)
-                                                                viewModel.loginWithCredentials(cleanUsername, pseudoEmail) {
-                                                                    (context as? android.app.Activity)?.runOnUiThread {
-                                                                        authInProgress = false
-                                                                        Toast.makeText(context, "Account created successfully! Welcome $cleanUsername.", Toast.LENGTH_LONG).show()
-                                                                        showCreateAccountDialog = false
-                                                                    }
-                                                                }
-                                                            } else {
-                                                                (context as? android.app.Activity)?.runOnUiThread {
-                                                                    authInProgress = false
-                                                                    Toast.makeText(context, "Registration error: $msg", Toast.LENGTH_LONG).show()
-                                                                }
-                                                            }
-                                                        }
-                                                    } else {
-                                                        authStatusText = "Authenticating with Supabase..."
-                                                        com.example.supabase.SupabaseSyncManager.loginWithSupabase(cleanUsername, cleanPassword) { success, msg ->
-                                                            if (success) {
-                                                                val pseudoEmail = com.example.supabase.SupabaseSyncManager.toSafeEmail(cleanUsername)
-                                                                viewModel.loginWithCredentials(cleanUsername, pseudoEmail) {
-                                                                    // Download and restore user backup from Supabase!
-                                                                    viewModel.restoreDataFromSupabase(pseudoEmail) { restoreSuccess ->
-                                                                        (context as? android.app.Activity)?.runOnUiThread {
-                                                                            authInProgress = false
-                                                                            if (restoreSuccess) {
-                                                                                Toast.makeText(context, "Welcome back $cleanUsername! Your data has been loaded.", Toast.LENGTH_LONG).show()
-                                                                            } else {
-                                                                                Toast.makeText(context, "Welcome $cleanUsername! No previous cloud data found.", Toast.LENGTH_LONG).show()
-                                                                            }
-                                                                            showCreateAccountDialog = false
-                                                                        }
-                                                                    }
-                                                                }
-                                                            } else {
-                                                                (context as? android.app.Activity)?.runOnUiThread {
-                                                                    authInProgress = false
-                                                                    Toast.makeText(context, "Login error: $msg", Toast.LENGTH_LONG).show()
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            },
+                                            onClick = { handleAuthSubmit() },
                                             colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
                                             contentPadding = PaddingValues(),
                                             shape = RoundedCornerShape(24.dp),
@@ -1514,6 +1543,7 @@ fun MainExpenseAppScreen(
             }
         }
     }
+}
 }
 
 // EMPTY GROUP PLACEHOLDER
