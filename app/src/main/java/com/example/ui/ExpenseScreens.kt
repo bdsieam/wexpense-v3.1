@@ -205,11 +205,13 @@ fun MainExpenseAppScreen(
     val userEmail by viewModel.userEmail.collectAsState()
     val isGoogleDriveConnected by viewModel.isGoogleDriveConnected.collectAsState()
     val googleDriveEmail by viewModel.googleDriveEmail.collectAsState()
+    var lastRestoredEmail by remember { mutableStateOf("") }
 
     // Automatically recover and restore user data from Supabase if local DB is empty
     LaunchedEffect(groups.size, isGoogleDriveConnected, googleDriveEmail, userEmail) {
         val targetEmail = viewModel.getEffectiveSyncEmail()
-        if (groups.isEmpty() && targetEmail.isNotBlank()) {
+        if (groups.isEmpty() && targetEmail.isNotBlank() && lastRestoredEmail != targetEmail) {
+            lastRestoredEmail = targetEmail
             viewModel.restoreDataFromSupabase(targetEmail) { success ->
                 if (success) {
                     Toast.makeText(context, "Data restored from Supabase!", Toast.LENGTH_SHORT).show()
@@ -975,18 +977,20 @@ fun MainExpenseAppScreen(
                 authInProgress = true
                 authStatusText = "Verifying code & restoring data from Supabase..."
 
-                if (isGoogleFlowPending) {
-                    viewModel.loginWithGoogle(verifiedNamePending, verifiedEmailPending)
-                } else {
-                    viewModel.loginWithCredentials(verifiedNamePending, verifiedEmailPending)
+                val onLoginComplete = {
+                    viewModel.restoreDataFromSupabase(verifiedEmailPending) { success ->
+                        authInProgress = false
+                        Toast.makeText(context, "Welcome $verifiedNamePending! Login Successful.", Toast.LENGTH_LONG).show()
+                        showCreateAccountDialog = false
+                        verificationEmailSent = false
+                        userInputCode = ""
+                    }
                 }
 
-                viewModel.restoreDataFromSupabase(verifiedEmailPending) { success ->
-                    authInProgress = false
-                    Toast.makeText(context, "Welcome $verifiedNamePending! Login Successful.", Toast.LENGTH_LONG).show()
-                    showCreateAccountDialog = false
-                    verificationEmailSent = false
-                    userInputCode = ""
+                if (isGoogleFlowPending) {
+                    viewModel.loginWithGoogle(verifiedNamePending, verifiedEmailPending, onLoginComplete)
+                } else {
+                    viewModel.loginWithCredentials(verifiedNamePending, verifiedEmailPending, onLoginComplete)
                 }
             } else {
                 Toast.makeText(context, "Invalid verification code! Please try again.", Toast.LENGTH_SHORT).show()
@@ -1322,14 +1326,12 @@ fun MainExpenseAppScreen(
                                                         com.example.supabase.SupabaseSyncManager.registerWithSupabase(cleanUsername, cleanPassword) { success, msg ->
                                                             if (success) {
                                                                 val pseudoEmail = com.example.supabase.SupabaseSyncManager.toSafeEmail(cleanUsername)
-                                                                viewModel.loginWithCredentials(cleanUsername, pseudoEmail)
-                                                                // Immediately upload local backup as initial state to Supabase
-                                                                viewModel.triggerGoogleDriveSync {}
-                                                                
-                                                                (context as? android.app.Activity)?.runOnUiThread {
-                                                                    authInProgress = false
-                                                                    Toast.makeText(context, "Account created successfully! Securely connected to Supabase.", Toast.LENGTH_LONG).show()
-                                                                    showCreateAccountDialog = false
+                                                                viewModel.loginWithCredentials(cleanUsername, pseudoEmail) {
+                                                                    (context as? android.app.Activity)?.runOnUiThread {
+                                                                        authInProgress = false
+                                                                        Toast.makeText(context, "Account created successfully! Welcome $cleanUsername.", Toast.LENGTH_LONG).show()
+                                                                        showCreateAccountDialog = false
+                                                                    }
                                                                 }
                                                             } else {
                                                                 (context as? android.app.Activity)?.runOnUiThread {
@@ -1343,18 +1345,18 @@ fun MainExpenseAppScreen(
                                                         com.example.supabase.SupabaseSyncManager.loginWithSupabase(cleanUsername, cleanPassword) { success, msg ->
                                                             if (success) {
                                                                 val pseudoEmail = com.example.supabase.SupabaseSyncManager.toSafeEmail(cleanUsername)
-                                                                viewModel.loginWithCredentials(cleanUsername, pseudoEmail)
-                                                                
-                                                                // Download and restore user backup from Supabase!
-                                                                viewModel.restoreDataFromSupabase(pseudoEmail) { restoreSuccess ->
-                                                                    (context as? android.app.Activity)?.runOnUiThread {
-                                                                        authInProgress = false
-                                                                        if (restoreSuccess) {
-                                                                            Toast.makeText(context, "Welcome back $cleanUsername! Local database successfully restored from Supabase.", Toast.LENGTH_LONG).show()
-                                                                        } else {
-                                                                            Toast.makeText(context, "Welcome back $cleanUsername! Successfully connected. No previous cloud backup found.", Toast.LENGTH_LONG).show()
+                                                                viewModel.loginWithCredentials(cleanUsername, pseudoEmail) {
+                                                                    // Download and restore user backup from Supabase!
+                                                                    viewModel.restoreDataFromSupabase(pseudoEmail) { restoreSuccess ->
+                                                                        (context as? android.app.Activity)?.runOnUiThread {
+                                                                            authInProgress = false
+                                                                            if (restoreSuccess) {
+                                                                                Toast.makeText(context, "Welcome back $cleanUsername! Your data has been loaded.", Toast.LENGTH_LONG).show()
+                                                                            } else {
+                                                                                Toast.makeText(context, "Welcome $cleanUsername! No previous cloud data found.", Toast.LENGTH_LONG).show()
+                                                                            }
+                                                                            showCreateAccountDialog = false
                                                                         }
-                                                                        showCreateAccountDialog = false
                                                                     }
                                                                 }
                                                             } else {
@@ -3014,15 +3016,15 @@ fun SyncCloudDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                                         isConnectingState = true
                                         connectMessage = "Connecting to Supabase Storage..."
                                         coroutineScope.launch {
-                                            viewModel.connectGoogleDrive(effectiveEmail, cleanName)
-                                            viewModel.restoreDataFromSupabase(effectiveEmail) { success ->
-                                                if (success) {
-                                                    Toast.makeText(context, "Data restored from Supabase!", Toast.LENGTH_LONG).show()
-                                                } else {
-                                                    viewModel.triggerGoogleDriveSync { }
-                                                    Toast.makeText(context, "Connected to Supabase! Initial backup uploaded.", Toast.LENGTH_SHORT).show()
+                                            viewModel.loginWithCredentials(cleanName, effectiveEmail) {
+                                                viewModel.restoreDataFromSupabase(effectiveEmail) { success ->
+                                                    if (success) {
+                                                        Toast.makeText(context, "Data restored from Supabase!", Toast.LENGTH_LONG).show()
+                                                    } else {
+                                                        Toast.makeText(context, "Connected to Supabase! Clean account ready.", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                    isConnectingState = false
                                                 }
-                                                isConnectingState = false
                                             }
                                         }
                                     }
@@ -3049,6 +3051,10 @@ fun SyncCloudDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                         )
                         Spacer(modifier = Modifier.height(20.dp))
 
+                        val currentUserName = viewModel.userName.value.ifBlank { "Account" }
+                        val currentUserEmail = viewModel.userEmail.value.ifBlank { com.example.supabase.SupabaseSyncManager.toSafeEmail(currentUserName) }
+                        val initialLetter = currentUserName.take(1).uppercase()
+
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -3059,13 +3065,11 @@ fun SyncCloudDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                                     isConnectingState = true
                                     connectMessage = "Connecting to Supabase Storage..."
                                     coroutineScope.launch {
-                                        val sieamEmail = "sieam.wexpense@gmail.com"
-                                        viewModel.connectGoogleDrive(sieamEmail, "Sieam")
-                                        viewModel.restoreDataFromSupabase(sieamEmail) { success ->
+                                        viewModel.connectGoogleDrive(currentUserEmail, currentUserName)
+                                        viewModel.restoreDataFromSupabase(currentUserEmail) { success ->
                                             if (success) {
                                                 Toast.makeText(context, "Data restored from Supabase!", Toast.LENGTH_LONG).show()
                                             } else {
-                                                viewModel.triggerGoogleDriveSync { }
                                                 Toast.makeText(context, "Connected to Supabase successfully!", Toast.LENGTH_SHORT).show()
                                             }
                                             isConnectingState = false
@@ -3083,7 +3087,7 @@ fun SyncCloudDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = "S",
+                                    text = initialLetter,
                                     color = Color.White,
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 18.sp
@@ -3092,12 +3096,12 @@ fun SyncCloudDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                             Spacer(modifier = Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "Sieam",
+                                    text = currentUserName,
                                     fontWeight = FontWeight.SemiBold,
                                     fontSize = 14.sp
                                 )
                                 Text(
-                                    text = "sieam.wexpense@gmail.com",
+                                    text = currentUserEmail,
                                     fontSize = 12.sp,
                                     color = Color.Gray
                                 )

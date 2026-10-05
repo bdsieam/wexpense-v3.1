@@ -257,7 +257,23 @@ object SupabaseSyncManager {
         if (!e.isNullOrBlank()) {
             return toSafeEmail(e)
         }
-        return "sieam.wexpense@gmail.com"
+        return ""
+    }
+
+    fun clearAccount() {
+        storedUsername = null
+        storedPassword = null
+        currentAccessToken = null
+        currentRefreshToken = null
+        prefs?.edit()?.apply {
+            remove("username")
+            remove("password")
+            remove("sync_email")
+            remove("access_token")
+            remove("refresh_token")
+            apply()
+        }
+        Log.i(TAG, "Cleared active sync account session")
     }
 
     fun saveAccount(usernameOrEmail: String) {
@@ -325,6 +341,7 @@ object SupabaseSyncManager {
 
     /**
      * Downloads the backup JSON data from the Supabase Storage Bucket.
+     * Dedicated to the specific user's backup file (e.g. {safeEmail}_backup.json).
      */
     fun downloadBackupFromSupabase(
         email: String,
@@ -335,7 +352,6 @@ object SupabaseSyncManager {
         val safeEmail = normalizedEmail.replace("@", "_at_").replace(".", "_dot_")
         val filename = "${safeEmail}_backup.json"
         
-        // Supabase private bucket objects are accessed via the authenticated endpoint
         val authUrl = "$SUPABASE_URL/storage/v1/object/authenticated/$BUCKET_NAME/$filename"
         Log.i(TAG, "Attempting Supabase backup download from: $authUrl")
 
@@ -348,40 +364,49 @@ object SupabaseSyncManager {
 
         client.newCall(request).enqueue(object : okhttp3.Callback {
             override fun onFailure(call: okhttp3.Call, e: IOException) {
-                Log.e(TAG, "Supabase download failed: ${e.localizedMessage}")
-                onResult(null)
+                Log.e(TAG, "Supabase download failed for $filename: ${e.localizedMessage}")
+                tryPublicFallback(filename, onResult)
             }
 
             override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                 response.use { resp ->
                     if (resp.isSuccessful) {
                         val bodyString = resp.body?.string()
-                        Log.i(TAG, "Supabase backup downloaded successfully (${bodyString?.length ?: 0} bytes)")
-                        onResult(bodyString)
+                        if (!bodyString.isNullOrBlank() && bodyString.contains("groups")) {
+                            Log.i(TAG, "Supabase backup downloaded successfully from $filename (${bodyString.length} bytes)")
+                            onResult(bodyString)
+                            return
+                        }
+                    }
+                    // Try public endpoint fallback
+                    tryPublicFallback(filename, onResult)
+                }
+            }
+        })
+    }
+
+    private fun tryPublicFallback(filename: String, onResult: (String?) -> Unit) {
+        val publicUrl = "$SUPABASE_URL/storage/v1/object/public/$BUCKET_NAME/$filename"
+        val fallbackReq = Request.Builder()
+            .url(publicUrl)
+            .addHeader("apikey", SUPABASE_PUBLISHABLE_KEY)
+            .addHeader("Authorization", "Bearer $SUPABASE_PUBLISHABLE_KEY")
+            .get()
+            .build()
+
+        client.newCall(fallbackReq).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: IOException) {
+                Log.e(TAG, "Public fallback failed for $filename: ${e.localizedMessage}")
+                onResult(null)
+            }
+            override fun onResponse(call: okhttp3.Call, fallbackResp: okhttp3.Response) {
+                fallbackResp.use { fResp ->
+                    val fBody = fResp.body?.string()
+                    if (fResp.isSuccessful && !fBody.isNullOrBlank() && fBody.contains("groups")) {
+                        Log.i(TAG, "Supabase backup downloaded from public endpoint $filename")
+                        onResult(fBody)
                     } else {
-                        // Fallback: try public endpoint or raw email if applicable
-                        val publicUrl = "$SUPABASE_URL/storage/v1/object/public/$BUCKET_NAME/$filename"
-                        val fallbackReq = Request.Builder()
-                            .url(publicUrl)
-                            .addHeader("apikey", SUPABASE_PUBLISHABLE_KEY)
-                            .addHeader("Authorization", "Bearer $SUPABASE_PUBLISHABLE_KEY")
-                            .get()
-                            .build()
-                        client.newCall(fallbackReq).enqueue(object : okhttp3.Callback {
-                            override fun onFailure(call: okhttp3.Call, e: IOException) {
-                                onResult(null)
-                            }
-                            override fun onResponse(call: okhttp3.Call, fallbackResp: okhttp3.Response) {
-                                fallbackResp.use { fResp ->
-                                    if (fResp.isSuccessful) {
-                                        onResult(fResp.body?.string())
-                                    } else {
-                                        Log.w(TAG, "Supabase download returned ${resp.code} (File might not exist yet)")
-                                        onResult(null)
-                                    }
-                                }
-                            }
-                        })
+                        onResult(null)
                     }
                 }
             }

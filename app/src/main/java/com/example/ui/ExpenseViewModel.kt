@@ -14,8 +14,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -45,11 +47,18 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
     private val prefs = application.getSharedPreferences("wexpense_prefs", android.content.Context.MODE_PRIVATE)
 
     val selectedGroupId = MutableStateFlow<Long?>(null)
-    val expenses = MutableStateFlow<List<Expense>>(emptyList())
     val userName = MutableStateFlow(prefs.getString("user_name", "") ?: "")
     val isLoggedIn = MutableStateFlow(prefs.getBoolean("is_logged_in", prefs.getString("user_name", "")?.isNotBlank() == true))
     val loginType = MutableStateFlow(prefs.getString("login_type", if (prefs.getString("user_name", "")?.isNotBlank() == true) "guest" else "") ?: "")
     val userEmail = MutableStateFlow(prefs.getString("user_email", if (prefs.getString("user_name", "")?.isNotBlank() == true) "guest@wexpense.com" else "") ?: "")
+
+    // Cloud / Supabase Sync states
+    val isGoogleDriveConnected = MutableStateFlow(prefs.getBoolean("gdrive_connected", false))
+    val googleDriveEmail = MutableStateFlow(prefs.getString("gdrive_email", "") ?: "")
+    val googleDriveName = MutableStateFlow(prefs.getString("gdrive_name", prefs.getString("user_name", "") ?: "") ?: "")
+    val googleDriveFolderName = MutableStateFlow(prefs.getString("gdrive_folder", "WeXpense") ?: "WeXpense")
+    val googleDriveAutoSync = MutableStateFlow(prefs.getBoolean("gdrive_autosync", true))
+    val googleDriveLastSync = MutableStateFlow(prefs.getString("gdrive_lastsync", "Never") ?: "Never")
 
     val pinnedGroupIds = MutableStateFlow<Set<Long>>(
         prefs.getStringSet("pinned_group_ids", emptySet())?.mapNotNull { it.toLongOrNull() }?.toSet() ?: emptySet()
@@ -77,43 +86,59 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
             .putBoolean("is_logged_in", true)
             .putString("login_type", "guest")
             .putString("user_email", "guest@wexpense.com")
+            .remove("last_selected_group_id")
             .apply()
         userName.value = name
         isLoggedIn.value = true
         loginType.value = "guest"
         userEmail.value = "guest@wexpense.com"
+        disconnectGoogleDrive()
+        viewModelScope.launch {
+            repository.clearAllData()
+            selectedGroupId.value = null
+        }
     }
 
-    fun loginWithGoogle(name: String, email: String) {
+    fun loginWithGoogle(name: String, email: String, onReady: () -> Unit = {}) {
         prefs.edit()
             .putString("user_name", name)
             .putBoolean("is_logged_in", true)
             .putString("login_type", "google")
             .putString("user_email", email)
+            .remove("last_selected_group_id")
             .apply()
         userName.value = name
         isLoggedIn.value = true
         loginType.value = "google"
         userEmail.value = email
         
-        // Also connect Google Drive sync state with Firebase
         connectGoogleDrive(email, name)
+        viewModelScope.launch {
+            repository.clearAllData()
+            selectedGroupId.value = null
+            onReady()
+        }
     }
 
-    fun loginWithCredentials(name: String, email: String) {
+    fun loginWithCredentials(name: String, email: String, onReady: () -> Unit = {}) {
         prefs.edit()
             .putString("user_name", name)
             .putBoolean("is_logged_in", true)
             .putString("login_type", "credentials")
             .putString("user_email", email)
+            .remove("last_selected_group_id")
             .apply()
         userName.value = name
         isLoggedIn.value = true
         loginType.value = "credentials"
         userEmail.value = email
         
-        // Also connect cloud sync state with Firebase
         connectGoogleDrive(email, name)
+        viewModelScope.launch {
+            repository.clearAllData()
+            selectedGroupId.value = null
+            onReady()
+        }
     }
 
     fun logoutUser() {
@@ -122,19 +147,20 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
             .putBoolean("is_logged_in", false)
             .putString("login_type", "")
             .putString("user_email", "")
+            .remove("last_selected_group_id")
             .apply()
         userName.value = ""
         isLoggedIn.value = false
         loginType.value = ""
         userEmail.value = ""
+        selectedGroupId.value = null
         
         viewModelScope.launch {
             repository.clearAllData()
-            selectedGroupId.value = null
         }
         
-        // Disconnect drive sync as well
         disconnectGoogleDrive()
+        com.example.supabase.SupabaseSyncManager.clearAccount()
     }
 
     // Tab state (0: Expenses, 1: Balance, 2: Share, 3: Web Preview)
@@ -154,46 +180,15 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
         groups.find { it.id == id }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
-    init {
-        com.example.supabase.SupabaseSyncManager.init(application)
-        
-        // Prepopulate with high fidelity sandbox data if empty
-        viewModelScope.launch {
-            prepopulateIfEmpty()
+    // Expenses State: completely reactive to selectedGroupId and database changes
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val expenses: StateFlow<List<Expense>> = selectedGroupId.flatMapLatest { id ->
+        if (id == null) {
+            flowOf(emptyList())
+        } else {
+            repository.getExpensesForGroup(id)
         }
-
-        // Automatically select the first or saved group whenever allGroups updates
-        viewModelScope.launch {
-            allGroups.collect { groups ->
-                if (groups.isNotEmpty()) {
-                    val currentId = selectedGroupId.value
-                    if (currentId == null || groups.none { it.id == currentId }) {
-                        val savedId = prefs.getLong("last_selected_group_id", -1L)
-                        val targetId = if (savedId != -1L && groups.any { it.id == savedId }) savedId else groups.first().id
-                        selectedGroupId.value = targetId
-                        prefs.edit().putLong("last_selected_group_id", targetId).apply()
-                    }
-                }
-            }
-        }
-
-        // Collect expenses based on selectedGroupId safely with job cancellation
-        var collectionJob: kotlinx.coroutines.Job? = null
-        viewModelScope.launch {
-            selectedGroupId.collect { id ->
-                collectionJob?.cancel()
-                if (id == null) {
-                    expenses.value = emptyList()
-                } else {
-                    collectionJob = viewModelScope.launch {
-                        repository.getExpensesForGroup(id).collect {
-                            expenses.value = it
-                        }
-                    }
-                }
-            }
-        }
-    }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Filtered and Sorted Expenses
     val filteredExpenses: StateFlow<List<Expense>> = combine(
@@ -228,9 +223,9 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Calculations: Total expenses for selected group
-    val totalGroupExpenses: StateFlow<Double> = expenses.mapStateFlow { list ->
+    val totalGroupExpenses: StateFlow<Double> = expenses.map { list ->
         list.sumOf { it.amount }
-    }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0.0)
 
     // Calculations: Per-person balances
     val participantBalances: StateFlow<List<ParticipantBalance>> = combine(
@@ -249,7 +244,6 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
 
             if (expense.isAllParticipants) {
                 // Split equally among involved members
-                // Find members who are checked/involved
                 val involvedMembers = expense.splits.filter { it.isInvolved }.map { it.participantName }
                 val targetMembers = if (involvedMembers.isEmpty()) members else involvedMembers
                 val share = expense.amount / targetMembers.size.toDouble()
@@ -280,7 +274,42 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Settle instructions
-    val settleInstructions: StateFlow<List<SettleInstruction>> = participantBalances.mapStateFlow { balances ->
+    val settleInstructions: StateFlow<List<SettleInstruction>> = participantBalances.map { balances ->
+        calculateSettleInstructions(balances)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    init {
+        com.example.supabase.SupabaseSyncManager.init(application)
+
+        // Automatically select the first or saved group whenever allGroups updates
+        viewModelScope.launch {
+            allGroups.collect { groups ->
+                if (groups.isNotEmpty()) {
+                    val currentId = selectedGroupId.value
+                    if (currentId == null || groups.none { it.id == currentId }) {
+                        val savedId = prefs.getLong("last_selected_group_id", -1L)
+                        val targetId = if (savedId != -1L && groups.any { it.id == savedId }) savedId else groups.first().id
+                        selectedGroupId.value = targetId
+                        prefs.edit().putLong("last_selected_group_id", targetId).apply()
+                    }
+                }
+            }
+        }
+
+        // On startup: check if local database is empty and restore from Supabase
+        viewModelScope.launch {
+            prepopulateIfEmpty()
+            val groups = repository.getAllGroupsList()
+            if (groups.isEmpty()) {
+                val email = getEffectiveSyncEmail()
+                if (email.isNotBlank()) {
+                    restoreDataFromSupabase(email)
+                }
+            }
+        }
+    }
+
+    private fun calculateSettleInstructions(balances: List<ParticipantBalance>): List<SettleInstruction> {
         val debtors = mutableListOf<Pair<String, Double>>()
         val creditors = mutableListOf<Pair<String, Double>>()
 
@@ -327,18 +356,7 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
                 cIdx++
             }
         }
-        instructions
-    }
-
-    // State helper extension
-    private fun <T, R> StateFlow<T>.mapStateFlow(transform: (T) -> R): StateFlow<R> {
-        val mutable = MutableStateFlow(transform(this.value))
-        viewModelScope.launch {
-            collect {
-                mutable.value = transform(it)
-            }
-        }
-        return mutable
+        return instructions
     }
 
     // Database Actions
@@ -355,7 +373,7 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
                 selectedGroupId.value = newId
                 prefs.edit().putLong("last_selected_group_id", newId).apply()
             }
-            triggerAutoFirebaseSync()
+            triggerAutoSupabaseSync()
         }
     }
 
@@ -367,7 +385,7 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
                 members = members
             )
             repository.updateGroup(updated)
-            triggerAutoFirebaseSync()
+            triggerAutoSupabaseSync()
         }
     }
 
@@ -386,7 +404,7 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
                     prefs.edit().remove("last_selected_group_id").apply()
                 }
             }
-            triggerAutoFirebaseSync()
+            triggerAutoSupabaseSync()
         }
     }
 
@@ -421,7 +439,7 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
                 isAdvance = isAdvance
             )
             repository.insertExpense(expense)
-            triggerAutoFirebaseSync()
+            triggerAutoSupabaseSync()
         }
     }
 
@@ -446,7 +464,7 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
                 category = "Settle"
             )
             repository.insertExpense(expense)
-            triggerAutoFirebaseSync()
+            triggerAutoSupabaseSync()
         }
     }
 
@@ -478,14 +496,14 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
                 isAdvance = isAdvance
             )
             repository.updateExpense(expense)
-            triggerAutoFirebaseSync()
+            triggerAutoSupabaseSync()
         }
     }
 
     fun deleteExpense(expense: Expense) {
         viewModelScope.launch {
             repository.deleteExpense(expense)
-            triggerAutoFirebaseSync()
+            triggerAutoSupabaseSync()
         }
     }
 
@@ -637,24 +655,17 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // Google Drive Sync states
-    val isGoogleDriveConnected = MutableStateFlow(prefs.getBoolean("gdrive_connected", false))
-    val googleDriveEmail = MutableStateFlow(prefs.getString("gdrive_email", "") ?: "")
-    val googleDriveName = MutableStateFlow(prefs.getString("gdrive_name", "Pranggol Sam") ?: "Pranggol Sam")
-    val googleDriveFolderName = MutableStateFlow(prefs.getString("gdrive_folder", "WeXpense") ?: "WeXpense")
-    val googleDriveAutoSync = MutableStateFlow(prefs.getBoolean("gdrive_autosync", true))
-    val googleDriveLastSync = MutableStateFlow(prefs.getString("gdrive_lastsync", "Never") ?: "Never")
-
-    fun connectGoogleDrive(email: String, name: String = "Sieam") {
+    fun connectGoogleDrive(email: String, name: String = "") {
+        val displayName = name.ifBlank { userName.value.ifBlank { "User" } }
         prefs.edit()
             .putBoolean("gdrive_connected", true)
             .putString("gdrive_email", email)
-            .putString("gdrive_name", name)
+            .putString("gdrive_name", displayName)
             .putString("gdrive_lastsync", "Never")
             .apply()
         isGoogleDriveConnected.value = true
         googleDriveEmail.value = email
-        googleDriveName.value = name
+        googleDriveName.value = displayName
         googleDriveLastSync.value = "Never"
         com.example.supabase.SupabaseSyncManager.saveAccount(email)
     }
@@ -663,12 +674,12 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
         prefs.edit()
             .putBoolean("gdrive_connected", false)
             .putString("gdrive_email", "")
-            .putString("gdrive_name", "Sieam")
+            .putString("gdrive_name", "")
             .putString("gdrive_lastsync", "Never")
             .apply()
         isGoogleDriveConnected.value = false
         googleDriveEmail.value = ""
-        googleDriveName.value = "Sieam"
+        googleDriveName.value = ""
         googleDriveLastSync.value = "Never"
     }
 
@@ -739,13 +750,13 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun triggerAutoFirebaseSync() {
-        triggerAutoSupabaseSync()
-    }
-
     fun restoreDataFromSupabase(email: String = "", onComplete: (Boolean) -> Unit = {}) {
         val targetEmail = if (email.isBlank()) getEffectiveSyncEmail() else email
-        // 1. First attempt to restore directly from Supabase Storage
+        if (targetEmail.isBlank()) {
+            onComplete(false)
+            return
+        }
+        // Restore directly from Supabase for target user only
         com.example.supabase.SupabaseSyncManager.downloadBackupFromSupabase(targetEmail) { supabaseData ->
             viewModelScope.launch {
                 var restored = false
@@ -760,54 +771,9 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
                     googleDriveLastSync.value = formattedDate
                     onComplete(true)
                 } else {
-                    // 2. If Supabase has no groups, check Firestore for previous backup to migrate into Supabase!
-                    val candidateEmails = listOf(targetEmail, "sieam.wexpense@gmail.com", "pranggols@gmail.com").distinct()
-                    tryFirestoreMigration(candidateEmails, 0) { migrated, jsonData ->
-                        if (migrated && !jsonData.isNullOrBlank()) {
-                            // Immediately persist this recovered data to Supabase Storage!
-                            com.example.supabase.SupabaseSyncManager.uploadBackupToSupabase(targetEmail, jsonData) { _ ->
-                                val sdf = java.text.SimpleDateFormat("yyyy-MM-dd hh:mm a", java.util.Locale.getDefault())
-                                val formattedDate = sdf.format(java.util.Date())
-                                prefs.edit().putString("gdrive_lastsync", formattedDate).apply()
-                                googleDriveLastSync.value = formattedDate
-                            }
-                            onComplete(true)
-                        } else {
-                            onComplete(false)
-                        }
-                    }
+                    onComplete(false)
                 }
             }
         }
-    }
-
-    private fun tryFirestoreMigration(
-        emails: List<String>,
-        index: Int,
-        onDone: (Boolean, String?) -> Unit
-    ) {
-        if (index >= emails.size) {
-            onDone(false, null)
-            return
-        }
-        val currentEmail = emails[index]
-        com.example.firebase.FirebaseSyncManager.downloadDataFromFirestore(getApplication(), currentEmail) { jsonData ->
-            if (!jsonData.isNullOrBlank()) {
-                viewModelScope.launch {
-                    val success = importBackupFromJsonString(jsonData)
-                    if (success) {
-                        onDone(true, jsonData)
-                    } else {
-                        tryFirestoreMigration(emails, index + 1, onDone)
-                    }
-                }
-            } else {
-                tryFirestoreMigration(emails, index + 1, onDone)
-            }
-        }
-    }
-
-    fun restoreDataFromFirebase(email: String = "", onComplete: (Boolean) -> Unit = {}) {
-        restoreDataFromSupabase(email, onComplete)
     }
 }
