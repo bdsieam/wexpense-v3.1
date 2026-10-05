@@ -103,6 +103,7 @@ import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -190,6 +191,25 @@ fun MainExpenseAppScreen(
     var expenseToDelete by remember { mutableStateOf<Expense?>(null) }
     var groupToDelete by remember { mutableStateOf<com.example.data.BillingGroup?>(null) }
     var groupSearchQuery by remember { mutableStateOf("") }
+    var appUpdateInfo by remember { mutableStateOf<AppReleaseInfo?>(null) }
+
+    val currentAppVersion = remember {
+        try {
+            val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+            pInfo.versionName ?: "3.1"
+        } catch (e: Exception) {
+            "3.1"
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        val result = AppUpdateManager.checkLatestRelease(currentAppVersion)
+        result.onSuccess { info ->
+            if (info != null && info.isNewer) {
+                appUpdateInfo = info
+            }
+        }
+    }
 
     // Support file export (backup)
     val exportLauncher = rememberLauncherForActivityResult(
@@ -879,6 +899,18 @@ fun MainExpenseAppScreen(
     // Profile Details Dialog
     if (showProfileDialog) {
         ProfileDialog(userName = userName, viewModel = viewModel, onDismiss = { showProfileDialog = false })
+    }
+
+    // App Update Dialog
+    if (appUpdateInfo != null) {
+        UpdateAvailableDialog(
+            releaseInfo = appUpdateInfo!!,
+            onDismiss = { appUpdateInfo = null },
+            onUpdate = {
+                AppUpdateManager.startApkDownload(context, appUpdateInfo!!.downloadUrl)
+                appUpdateInfo = null
+            }
+        )
     }
 
     // Onboarding: Accounts and Authentication Dialog
@@ -5593,10 +5625,112 @@ fun WebReportPreviewScreen(viewModel: ExpenseViewModel) {
     }
 }
 
+// --- UPDATE AVAILABLE DIALOG ---
+@Composable
+fun UpdateAvailableDialog(
+    releaseInfo: AppReleaseInfo,
+    onDismiss: () -> Unit,
+    onUpdate: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CloudSync,
+                    contentDescription = "Update Available",
+                    tint = RoyalBlue
+                )
+                Text(
+                    text = "New Update Available!",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 17.sp,
+                    color = RoyalBlue
+                )
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text("New Version:", fontSize = 12.sp, color = TextSecondary)
+                    Box(
+                        modifier = Modifier
+                            .background(RoyalBlue.copy(alpha = 0.1f), RoundedCornerShape(4.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = "v${releaseInfo.versionName}",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = RoyalBlue
+                        )
+                    }
+                }
+                
+                if (releaseInfo.releaseNotes.isNotBlank()) {
+                    Text(
+                        text = "What's New in this update:",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 130.dp)
+                            .background(Color(0xFFF8F9FA), RoundedCornerShape(8.dp))
+                            .border(1.dp, BorderColor, RoundedCornerShape(8.dp))
+                            .padding(8.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        Text(
+                            text = releaseInfo.releaseNotes,
+                            fontSize = 11.sp,
+                            color = TextPrimary,
+                            lineHeight = 16.sp
+                        )
+                    }
+                }
+
+                Text(
+                    text = "Tap 'Update Now' to download and install the latest APK directly on your phone.",
+                    fontSize = 11.sp,
+                    color = TextSecondary
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onUpdate,
+                colors = ButtonDefaults.buttonColors(containerColor = RoyalBlue),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("Update Now", color = Color.White, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Later", color = TextSecondary)
+            }
+        },
+        containerColor = SurfaceLight,
+        shape = RoundedCornerShape(16.dp)
+    )
+}
+
 // ABOUT DEVELOPER SCREEN
 @Composable
 fun AboutDeveloperScreen(viewModel: ExpenseViewModel) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    var checkingUpdate by remember { mutableStateOf(false) }
+    var updateDialogInfo by remember { mutableStateOf<AppReleaseInfo?>(null) }
     val imageResId = remember {
         context.resources.getIdentifier("img_sieam_hasan", "drawable", context.packageName)
     }
@@ -5792,7 +5926,7 @@ fun AboutDeveloperScreen(viewModel: ExpenseViewModel) {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // App Information Card
+        // App Information Card with GitHub Releases Auto-Update
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = SurfaceLight),
@@ -5802,9 +5936,9 @@ fun AboutDeveloperScreen(viewModel: ExpenseViewModel) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(16.dp)
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text(text = "App Version", fontSize = 12.sp, color = TextSecondary)
                 val versionName = remember {
                     try {
                         val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
@@ -5813,8 +5947,84 @@ fun AboutDeveloperScreen(viewModel: ExpenseViewModel) {
                         "3.1"
                     }
                 }
-                Text(text = "v$versionName", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = RoyalBlue)
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(text = "App Version", fontSize = 12.sp, color = TextSecondary)
+                        Text(text = "v$versionName", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = RoyalBlue)
+                    }
+
+                    Button(
+                        onClick = {
+                            if (!checkingUpdate) {
+                                checkingUpdate = true
+                                coroutineScope.launch {
+                                    val result = AppUpdateManager.checkLatestRelease(versionName)
+                                    checkingUpdate = false
+                                    result.fold(
+                                        onSuccess = { info ->
+                                            if (info != null && info.isNewer) {
+                                                updateDialogInfo = info
+                                            } else {
+                                                Toast.makeText(context, "You are using the latest version (v$versionName) 🎉", Toast.LENGTH_SHORT).show()
+                                            }
+                                        },
+                                        onFailure = { err ->
+                                            Toast.makeText(context, "Update check info: ${err.message}", Toast.LENGTH_LONG).show()
+                                        }
+                                    )
+                                }
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = RoyalBlue),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.height(36.dp)
+                    ) {
+                        if (checkingUpdate) {
+                            androidx.compose.material3.CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                color = Color.White,
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CloudSync,
+                                    contentDescription = "Check for Update",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text("Check for Update", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+
+                Text(
+                    text = "Automated updates powered by GitHub Releases (bdsieam/wexpense-v3.1).",
+                    fontSize = 10.sp,
+                    color = TextSecondary
+                )
             }
+        }
+
+        if (updateDialogInfo != null) {
+            UpdateAvailableDialog(
+                releaseInfo = updateDialogInfo!!,
+                onDismiss = { updateDialogInfo = null },
+                onUpdate = {
+                    AppUpdateManager.startApkDownload(context, updateDialogInfo!!.downloadUrl)
+                    updateDialogInfo = null
+                }
+            )
         }
 
     }

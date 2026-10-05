@@ -1,0 +1,78 @@
+name: Build & Release APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Restore Debug Keystore
+        run: |
+          if [ -f debug.keystore.base64 ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+            echo "Keystore restored successfully"
+          fi
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Extract App Version
+        id: version_info
+        run: |
+          VERSION_NAME=$(grep -E 'versionName\s*=\s*' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+          VERSION_CODE=$(grep -E 'versionCode\s*=\s*' app/build.gradle.kts | head -n 1 | sed -E 's/.*=\s*([0-9]+).*/\1/')
+          if [ -z "$VERSION_NAME" ]; then
+            VERSION_NAME="3.1"
+          fi
+          echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_ENV
+          echo "VERSION_CODE=$VERSION_CODE" >> $GITHUB_ENV
+          echo "TAG_NAME=v$VERSION_NAME" >> $GITHUB_ENV
+          echo "Extracted Version: v$VERSION_NAME (Code: $VERSION_CODE)"
+
+      - name: Build Debug APK
+        run: gradle assembleDebug --stacktrace
+
+      - name: Prepare Release Artifacts
+        run: |
+          mkdir -p release-artifacts
+          cp app/build/outputs/apk/debug/app-debug.apk release-artifacts/wexpense-v${{ env.VERSION_NAME }}.apk
+          cp app/build/outputs/apk/debug/app-debug.apk release-artifacts/wexpense.apk
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          name: "WeXpense ${{ env.TAG_NAME }}"
+          body: |
+            ## 🎉 WeXpense ${{ env.TAG_NAME }}
+            
+            Automated build from commit: `${{ github.sha }}`
+            
+            ### 📥 Download & Install:
+            - **[wexpense.apk](https://github.com/${{ github.repository }}/releases/download/${{ env.TAG_NAME }}/wexpense.apk)** (Latest standalone APK)
+            - Direct installation file: `wexpense-v${{ env.VERSION_NAME }}.apk`
+            
+            > **Note:** If prompted with "Install unknown apps", grant permission for your browser or file manager to proceed.
+          draft: false
+          prerelease: false
+          files: |
+            release-artifacts/wexpense.apk
+            release-artifacts/wexpense-v${{ env.VERSION_NAME }}.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
