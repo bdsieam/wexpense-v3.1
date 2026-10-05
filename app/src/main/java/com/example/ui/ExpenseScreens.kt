@@ -196,9 +196,9 @@ fun MainExpenseAppScreen(
     val currentAppVersion = remember {
         try {
             val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
-            pInfo.versionName ?: "3.1"
+            pInfo.versionName ?: "3.2"
         } catch (e: Exception) {
-            "3.1"
+            "3.2"
         }
     }
 
@@ -5978,9 +5978,9 @@ fun AboutDeveloperScreen(viewModel: ExpenseViewModel) {
                 val versionName = remember {
                     try {
                         val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
-                        pInfo.versionName ?: "3.1"
+                        pInfo.versionName ?: "3.2"
                     } catch (e: Exception) {
-                        "3.1"
+                        "3.2"
                     }
                 }
 

@@ -41,7 +41,7 @@ jobs:
           VERSION_NAME=$(grep -E 'versionName\s*=\s*' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
           VERSION_CODE=$(grep -E 'versionCode\s*=\s*' app/build.gradle.kts | head -n 1 | sed -E 's/.*=\s*([0-9]+).*/\1/')
           if [ -z "$VERSION_NAME" ]; then
-            VERSION_NAME="3.1"
+            VERSION_NAME="3.2"
           fi
           echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_ENV
           echo "VERSION_CODE=$VERSION_CODE" >> $GITHUB_ENV
