@@ -205,7 +205,8 @@ object SupabaseSyncManager {
         // Ensure bucket is ready first asynchronously
         ensureBucketExists()
 
-        val safeEmail = email.replace("@", "_at_").replace(".", "_dot_")
+        val normalizedEmail = if (!email.contains("@")) toSafeEmail(email) else email
+        val safeEmail = normalizedEmail.replace("@", "_at_").replace(".", "_dot_")
         val filename = "${safeEmail}_backup.json"
         val url = "$SUPABASE_URL/storage/v1/object/$BUCKET_NAME/$filename"
 
@@ -229,7 +230,7 @@ object SupabaseSyncManager {
             override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                 response.use { resp ->
                     if (resp.isSuccessful) {
-                        Log.i(TAG, "Supabase backup uploaded successfully for: $email")
+                        Log.i(TAG, "Supabase backup uploaded successfully for: $normalizedEmail")
                         onComplete(true)
                     } else {
                         Log.e(TAG, "Supabase upload failed with code: ${resp.code} - ${resp.body?.string()}")
@@ -247,14 +248,16 @@ object SupabaseSyncManager {
         email: String,
         onResult: (String?) -> Unit
     ) {
-        val safeEmail = email.replace("@", "_at_").replace(".", "_dot_")
+        val normalizedEmail = if (!email.contains("@")) toSafeEmail(email) else email
+        val safeEmail = normalizedEmail.replace("@", "_at_").replace(".", "_dot_")
         val filename = "${safeEmail}_backup.json"
-        val url = "$SUPABASE_URL/storage/v1/object/authenticated/$BUCKET_NAME/$filename"
+        val publicUrl = "$SUPABASE_URL/storage/v1/object/public/$BUCKET_NAME/$filename"
+
+        Log.i(TAG, "Attempting Supabase backup download from: $publicUrl")
 
         val request = Request.Builder()
-            .url(url)
-            .addHeader("apikey", SUPABASE_SECRET_KEY)
-            .addHeader("Authorization", "Bearer $SUPABASE_SECRET_KEY")
+            .url(publicUrl)
+            .addHeader("apikey", SUPABASE_PUBLISHABLE_KEY)
             .get()
             .build()
 
@@ -268,7 +271,28 @@ object SupabaseSyncManager {
                 response.use { resp ->
                     if (resp.isSuccessful) {
                         val bodyString = resp.body?.string()
+                        Log.i(TAG, "Supabase backup downloaded successfully (${bodyString?.length ?: 0} bytes)")
                         onResult(bodyString)
+                    } else if (resp.code == 404 && email != normalizedEmail) {
+                        // Fallback: try raw email
+                        val rawSafeEmail = email.replace("@", "_at_").replace(".", "_dot_")
+                        val fallbackFilename = "${rawSafeEmail}_backup.json"
+                        val fallbackUrl = "$SUPABASE_URL/storage/v1/object/public/$BUCKET_NAME/$fallbackFilename"
+                        val fallbackRequest = Request.Builder().url(fallbackUrl).get().build()
+                        client.newCall(fallbackRequest).enqueue(object : okhttp3.Callback {
+                            override fun onFailure(call: okhttp3.Call, e: IOException) {
+                                onResult(null)
+                            }
+                            override fun onResponse(call: okhttp3.Call, fallbackResp: okhttp3.Response) {
+                                fallbackResp.use { fResp ->
+                                    if (fResp.isSuccessful) {
+                                        onResult(fResp.body?.string())
+                                    } else {
+                                        onResult(null)
+                                    }
+                                }
+                            }
+                        })
                     } else {
                         Log.w(TAG, "Supabase download failed with code: ${resp.code} (File might not exist yet)")
                         onResult(null)

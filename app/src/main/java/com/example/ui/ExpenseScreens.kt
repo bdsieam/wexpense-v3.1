@@ -202,6 +202,22 @@ fun MainExpenseAppScreen(
         }
     }
 
+    val userEmail by viewModel.userEmail.collectAsState()
+    val isGoogleDriveConnected by viewModel.isGoogleDriveConnected.collectAsState()
+    val googleDriveEmail by viewModel.googleDriveEmail.collectAsState()
+
+    // Automatically recover and restore user data if logged in but local DB is empty
+    LaunchedEffect(groups.size, isGoogleDriveConnected, googleDriveEmail, userEmail) {
+        val targetEmail = if (googleDriveEmail.isNotBlank()) googleDriveEmail else userEmail
+        if (groups.isEmpty() && targetEmail.isNotBlank()) {
+            viewModel.restoreDataFromFirebase(targetEmail) { success ->
+                if (success) {
+                    Toast.makeText(context, "Data restored from Supabase!", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
     LaunchedEffect(Unit) {
         val result = AppUpdateManager.checkLatestRelease(currentAppVersion)
         result.onSuccess { info ->
@@ -3350,7 +3366,7 @@ fun SyncCloudDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                     if (isSyncingState) {
                         CircularProgressIndicator(color = RoyalBlue, modifier = Modifier.size(32.dp))
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text("Uploading backup to Supabase Storage...", fontSize = 12.sp, color = RoyalBlue)
+                        Text(if (allGroups.isEmpty()) "Restoring data from Supabase..." else "Syncing with Supabase Storage...", fontSize = 12.sp, color = RoyalBlue)
                     } else {
                         Button(
                             onClick = {
@@ -3365,7 +3381,27 @@ fun SyncCloudDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                         ) {
                             Icon(imageVector = Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Sync Now", color = Color.White)
+                            Text(if (allGroups.isEmpty()) "Restore Data Now" else "Sync Now", color = Color.White)
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        OutlinedButton(
+                            onClick = {
+                                isSyncingState = true
+                                viewModel.restoreDataFromFirebase(email) { success ->
+                                    isSyncingState = false
+                                    val msg = if (success) "Restored from Supabase successfully!" else "Failed to restore or no backup found"
+                                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                }
+                            },
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = RoyalBlue),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(imageVector = Icons.Default.CloudSync, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Restore from Supabase", color = RoyalBlue)
                         }
 
                         Spacer(modifier = Modifier.height(8.dp))

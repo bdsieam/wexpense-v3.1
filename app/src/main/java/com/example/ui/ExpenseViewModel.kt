@@ -664,6 +664,15 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             val email = googleDriveEmail.value
             if (isGoogleDriveConnected.value && email.isNotBlank()) {
+                val currentGroups = allGroups.value
+                if (currentGroups.isEmpty()) {
+                    // Local DB is empty: do not overwrite cloud with empty data; restore from cloud instead!
+                    restoreDataFromFirebase(email) {
+                        onComplete()
+                    }
+                    return@launch
+                }
+
                 val jsonData = exportBackupAsJsonString()
                 // Upload to Supabase (Primary Cloud Destination)
                 com.example.supabase.SupabaseSyncManager.uploadBackupToSupabase(email, jsonData) { supabaseSuccess ->
@@ -686,7 +695,7 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
     fun triggerAutoFirebaseSync() {
         if (isGoogleDriveConnected.value && googleDriveAutoSync.value) {
             val email = googleDriveEmail.value
-            if (email.isNotBlank()) {
+            if (email.isNotBlank() && allGroups.value.isNotEmpty()) {
                 viewModelScope.launch {
                     try {
                         val jsonData = exportBackupAsJsonString()
@@ -716,6 +725,12 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
             if (supabaseData != null) {
                 viewModelScope.launch {
                     val success = importBackupFromJsonString(supabaseData)
+                    if (success) {
+                        val sdf = java.text.SimpleDateFormat("yyyy-MM-dd hh:mm a", java.util.Locale.getDefault())
+                        val formattedDate = sdf.format(java.util.Date())
+                        prefs.edit().putString("gdrive_lastsync", formattedDate).apply()
+                        googleDriveLastSync.value = formattedDate
+                    }
                     onComplete(success)
                 }
             } else {
@@ -724,6 +739,12 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
                     if (jsonData != null) {
                         viewModelScope.launch {
                             val success = importBackupFromJsonString(jsonData)
+                            if (success) {
+                                val sdf = java.text.SimpleDateFormat("yyyy-MM-dd hh:mm a", java.util.Locale.getDefault())
+                                val formattedDate = sdf.format(java.util.Date())
+                                prefs.edit().putString("gdrive_lastsync", formattedDate).apply()
+                                googleDriveLastSync.value = formattedDate
+                            }
                             onComplete(success)
                         }
                     } else {
