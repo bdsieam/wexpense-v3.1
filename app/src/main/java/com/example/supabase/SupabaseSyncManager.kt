@@ -16,6 +16,7 @@ object SupabaseSyncManager {
 
     const val SUPABASE_URL = "https://ydntfvpsrsxegupxyvtz.supabase.co"
     const val SUPABASE_PUBLISHABLE_KEY = "sb_publishable_zoHyPI-t9Dpu2L17qUoewA_aIL82GBX"
+    const val SUPABASE_JWKS_URL = "https://ydntfvpsrsxegupxyvtz.supabase.co/auth/v1/.well-known/jwks.json"
     const val BUCKET_NAME = "wexpense-backups"
 
     private val client = OkHttpClient()
@@ -25,6 +26,8 @@ object SupabaseSyncManager {
     @Volatile private var currentRefreshToken: String? = null
     @Volatile private var storedUsername: String? = null
     @Volatile private var storedPassword: String? = null
+    @Volatile var isConnected: Boolean = true
+        private set
 
     fun init(context: Context) {
         if (prefs == null) {
@@ -33,8 +36,44 @@ object SupabaseSyncManager {
             currentRefreshToken = prefs?.getString("refresh_token", null)
             storedUsername = prefs?.getString("username", null)
             storedPassword = prefs?.getString("password", null)
-            Log.d(TAG, "SupabaseSyncManager initialized. Has token: ${!currentAccessToken.isNullOrBlank()}")
+            Log.d(TAG, "SupabaseSyncManager initialized. Target: $SUPABASE_URL")
+            testConnection { success, msg ->
+                isConnected = success
+                Log.d(TAG, "Supabase Connection Status: $success ($msg)")
+            }
         }
+    }
+
+    /**
+     * Tests connectivity to Supabase using the JWKS endpoint and publishable key.
+     */
+    fun testConnection(onResult: (Boolean, String) -> Unit) {
+        val request = Request.Builder()
+            .url(SUPABASE_JWKS_URL)
+            .addHeader("apikey", SUPABASE_PUBLISHABLE_KEY)
+            .get()
+            .build()
+
+        client.newCall(request).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: IOException) {
+                Log.e(TAG, "Supabase connection test failed: ${e.localizedMessage}")
+                isConnected = false
+                onResult(false, e.localizedMessage ?: "Network error")
+            }
+
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                response.use { resp ->
+                    if (resp.isSuccessful) {
+                        Log.i(TAG, "✅ Supabase database connection verified: $SUPABASE_URL")
+                        isConnected = true
+                        onResult(true, "Connected")
+                    } else {
+                        Log.w(TAG, "Supabase response code: ${resp.code}")
+                        onResult(false, "Code ${resp.code}")
+                    }
+                }
+            }
+        })
     }
 
     private fun saveSession(token: String?, refresh: String?, username: String? = null, password: String? = null) {
@@ -209,6 +248,29 @@ object SupabaseSyncManager {
         }
     }
 
+    fun getStoredAccountEmail(): String {
+        val u = storedUsername ?: prefs?.getString("username", null)
+        if (!u.isNullOrBlank()) {
+            return toSafeEmail(u)
+        }
+        val e = prefs?.getString("sync_email", null)
+        if (!e.isNullOrBlank()) {
+            return toSafeEmail(e)
+        }
+        return "sieam.wexpense@gmail.com"
+    }
+
+    fun saveAccount(usernameOrEmail: String) {
+        val safeEmail = toSafeEmail(usernameOrEmail)
+        storedUsername = usernameOrEmail
+        prefs?.edit()?.apply {
+            putString("username", usernameOrEmail)
+            putString("sync_email", safeEmail)
+            apply()
+        }
+        Log.i(TAG, "Saved active sync account: $usernameOrEmail -> $safeEmail")
+    }
+
     /**
      * Uploads the backup JSON data to the Supabase Storage Bucket.
      * Uses upsert to overwrite the user's existing backup file and immediately update
@@ -219,36 +281,24 @@ object SupabaseSyncManager {
         jsonData: String,
         onComplete: (Boolean) -> Unit
     ) {
-        val normalizedEmail = if (!email.contains("@")) toSafeEmail(email) else email
+        val targetEmail = if (email.isBlank()) getStoredAccountEmail() else email
+        val normalizedEmail = if (!targetEmail.contains("@")) toSafeEmail(targetEmail) else targetEmail
         val safeEmail = normalizedEmail.replace("@", "_at_").replace(".", "_dot_")
         val filename = "${safeEmail}_backup.json"
         val url = "$SUPABASE_URL/storage/v1/object/$BUCKET_NAME/$filename"
 
-        uploadWithRetry(url, filename, normalizedEmail, jsonData, isRetry = false, onComplete = onComplete)
-    }
-
-    private fun uploadWithRetry(
-        url: String,
-        filename: String,
-        email: String,
-        jsonData: String,
-        isRetry: Boolean,
-        onComplete: (Boolean) -> Unit
-    ) {
+        Log.i(TAG, "Uploading backup to Supabase Storage: $url (filename: $filename)")
         val requestBody = jsonData.toByteArray(Charsets.UTF_8).toRequestBody("application/json".toMediaTypeOrNull())
 
-        val token = currentAccessToken
-        val requestBuilder = Request.Builder()
+        // Use the Supabase publishable key as Bearer token for seamless upsert on the storage bucket
+        val request = Request.Builder()
             .url(url)
             .addHeader("apikey", SUPABASE_PUBLISHABLE_KEY)
+            .addHeader("Authorization", "Bearer $SUPABASE_PUBLISHABLE_KEY")
             .addHeader("x-upsert", "true")
             .addHeader("Content-Type", "application/json")
-
-        if (!token.isNullOrBlank()) {
-            requestBuilder.addHeader("Authorization", "Bearer $token")
-        }
-
-        val request = requestBuilder.post(requestBody).build()
+            .post(requestBody)
+            .build()
 
         client.newCall(request).enqueue(object : okhttp3.Callback {
             override fun onFailure(call: okhttp3.Call, e: IOException) {
@@ -264,16 +314,6 @@ object SupabaseSyncManager {
                     if (resp.isSuccessful) {
                         Log.i(TAG, "✅ Supabase backup uploaded & modified timestamp updated for: $filename")
                         onComplete(true)
-                    } else if ((code == 401 || code == 403) && !isRetry && !storedUsername.isNullOrBlank()) {
-                        Log.w(TAG, "Supabase upload returned $code ($body). Attempting silent re-auth and retry...")
-                        reAuthenticateSilently { authSuccess ->
-                            if (authSuccess) {
-                                uploadWithRetry(url, filename, email, jsonData, isRetry = true, onComplete)
-                            } else {
-                                Log.e(TAG, "Silent re-auth failed, upload rejected: $body")
-                                onComplete(false)
-                            }
-                        }
                     } else {
                         Log.e(TAG, "❌ Supabase upload failed with code: $code - $body")
                         onComplete(false)
@@ -290,16 +330,19 @@ object SupabaseSyncManager {
         email: String,
         onResult: (String?) -> Unit
     ) {
-        val normalizedEmail = if (!email.contains("@")) toSafeEmail(email) else email
+        val targetEmail = if (email.isBlank()) getStoredAccountEmail() else email
+        val normalizedEmail = if (!targetEmail.contains("@")) toSafeEmail(targetEmail) else targetEmail
         val safeEmail = normalizedEmail.replace("@", "_at_").replace(".", "_dot_")
         val filename = "${safeEmail}_backup.json"
-        val publicUrl = "$SUPABASE_URL/storage/v1/object/public/$BUCKET_NAME/$filename"
-
-        Log.i(TAG, "Attempting Supabase backup download from: $publicUrl")
+        
+        // Supabase private bucket objects are accessed via the authenticated endpoint
+        val authUrl = "$SUPABASE_URL/storage/v1/object/authenticated/$BUCKET_NAME/$filename"
+        Log.i(TAG, "Attempting Supabase backup download from: $authUrl")
 
         val request = Request.Builder()
-            .url(publicUrl)
+            .url(authUrl)
             .addHeader("apikey", SUPABASE_PUBLISHABLE_KEY)
+            .addHeader("Authorization", "Bearer $SUPABASE_PUBLISHABLE_KEY")
             .get()
             .build()
 
@@ -315,13 +358,16 @@ object SupabaseSyncManager {
                         val bodyString = resp.body?.string()
                         Log.i(TAG, "Supabase backup downloaded successfully (${bodyString?.length ?: 0} bytes)")
                         onResult(bodyString)
-                    } else if (resp.code == 404 && email != normalizedEmail) {
-                        // Fallback: try raw email
-                        val rawSafeEmail = email.replace("@", "_at_").replace(".", "_dot_")
-                        val fallbackFilename = "${rawSafeEmail}_backup.json"
-                        val fallbackUrl = "$SUPABASE_URL/storage/v1/object/public/$BUCKET_NAME/$fallbackFilename"
-                        val fallbackRequest = Request.Builder().url(fallbackUrl).get().build()
-                        client.newCall(fallbackRequest).enqueue(object : okhttp3.Callback {
+                    } else {
+                        // Fallback: try public endpoint or raw email if applicable
+                        val publicUrl = "$SUPABASE_URL/storage/v1/object/public/$BUCKET_NAME/$filename"
+                        val fallbackReq = Request.Builder()
+                            .url(publicUrl)
+                            .addHeader("apikey", SUPABASE_PUBLISHABLE_KEY)
+                            .addHeader("Authorization", "Bearer $SUPABASE_PUBLISHABLE_KEY")
+                            .get()
+                            .build()
+                        client.newCall(fallbackReq).enqueue(object : okhttp3.Callback {
                             override fun onFailure(call: okhttp3.Call, e: IOException) {
                                 onResult(null)
                             }
@@ -330,14 +376,12 @@ object SupabaseSyncManager {
                                     if (fResp.isSuccessful) {
                                         onResult(fResp.body?.string())
                                     } else {
+                                        Log.w(TAG, "Supabase download returned ${resp.code} (File might not exist yet)")
                                         onResult(null)
                                     }
                                 }
                             }
                         })
-                    } else {
-                        Log.w(TAG, "Supabase download failed with code: ${resp.code} (File might not exist yet)")
-                        onResult(null)
                     }
                 }
             }

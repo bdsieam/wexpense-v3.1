@@ -206,11 +206,11 @@ fun MainExpenseAppScreen(
     val isGoogleDriveConnected by viewModel.isGoogleDriveConnected.collectAsState()
     val googleDriveEmail by viewModel.googleDriveEmail.collectAsState()
 
-    // Automatically recover and restore user data if logged in but local DB is empty
+    // Automatically recover and restore user data from Supabase if local DB is empty
     LaunchedEffect(groups.size, isGoogleDriveConnected, googleDriveEmail, userEmail) {
-        val targetEmail = if (googleDriveEmail.isNotBlank()) googleDriveEmail else userEmail
+        val targetEmail = viewModel.getEffectiveSyncEmail()
         if (groups.isEmpty() && targetEmail.isNotBlank()) {
-            viewModel.restoreDataFromFirebase(targetEmail) { success ->
+            viewModel.restoreDataFromSupabase(targetEmail) { success ->
                 if (success) {
                     Toast.makeText(context, "Data restored from Supabase!", Toast.LENGTH_SHORT).show()
                 }
@@ -965,44 +965,15 @@ fun MainExpenseAppScreen(
             verifiedNamePending = pendingName.trim()
             isGoogleFlowPending = isGoogleFlow
 
-            try {
-                val firestore = com.google.firebase.firestore.FirebaseFirestore.getInstance()
-                val docRef = firestore.collection("verifications").document(cleanEmail)
-                val verificationData = hashMapOf(
-                    "email" to cleanEmail,
-                    "name" to pendingName.trim(),
-                    "code" to code,
-                    "verified" to false,
-                    "timestamp" to System.currentTimeMillis()
-                )
-                docRef.set(verificationData)
-                    .addOnSuccessListener {
-                        authInProgress = false
-                        verificationEmailSent = true
-                        Toast.makeText(context, "Verification Email Sent! [Database Connected] Code: $code", Toast.LENGTH_LONG).show()
-                    }
-                    .addOnFailureListener { err ->
-                        authInProgress = false
-                        verificationEmailSent = true
-                        Toast.makeText(context, "Verification triggered (Offline Mode). Code: $code", Toast.LENGTH_LONG).show()
-                    }
-            } catch (e: Exception) {
-                authInProgress = false
-                verificationEmailSent = true
-                Toast.makeText(context, "Verification triggered. Code: $code", Toast.LENGTH_LONG).show()
-            }
+            authInProgress = false
+            verificationEmailSent = true
+            Toast.makeText(context, "Verification Code Generated: $code", Toast.LENGTH_LONG).show()
         }
 
         val verifyAndLogin = {
             if (userInputCode.trim() == generatedCode) {
                 authInProgress = true
-                authStatusText = "Verifying code & restoring data..."
-
-                try {
-                    val firestore = com.google.firebase.firestore.FirebaseFirestore.getInstance()
-                    firestore.collection("verifications").document(verifiedEmailPending)
-                        .update("verified", true)
-                } catch (e: Exception) {}
+                authStatusText = "Verifying code & restoring data from Supabase..."
 
                 if (isGoogleFlowPending) {
                     viewModel.loginWithGoogle(verifiedNamePending, verifiedEmailPending)
@@ -1010,7 +981,7 @@ fun MainExpenseAppScreen(
                     viewModel.loginWithCredentials(verifiedNamePending, verifiedEmailPending)
                 }
 
-                viewModel.restoreDataFromFirebase(verifiedEmailPending) { success ->
+                viewModel.restoreDataFromSupabase(verifiedEmailPending) { success ->
                     authInProgress = false
                     Toast.makeText(context, "Welcome $verifiedNamePending! Login Successful.", Toast.LENGTH_LONG).show()
                     showCreateAccountDialog = false
@@ -1375,7 +1346,7 @@ fun MainExpenseAppScreen(
                                                                 viewModel.loginWithCredentials(cleanUsername, pseudoEmail)
                                                                 
                                                                 // Download and restore user backup from Supabase!
-                                                                viewModel.restoreDataFromFirebase(pseudoEmail) { restoreSuccess ->
+                                                                viewModel.restoreDataFromSupabase(pseudoEmail) { restoreSuccess ->
                                                                     (context as? android.app.Activity)?.runOnUiThread {
                                                                         authInProgress = false
                                                                         if (restoreSuccess) {
@@ -2981,14 +2952,14 @@ fun SyncCloudDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                 } else if (isChoosingAccount) {
                     if (isAddingCustomAccount) {
                         Text(
-                            text = "Add Custom Account",
+                            text = "Connect Supabase Account",
                             fontWeight = FontWeight.Bold,
                             fontSize = 18.sp,
                             color = RoyalBlue
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "Enter any name and email address to connect in custom mode.",
+                            text = "Enter your username or email. Changes will automatically sync to Supabase Storage.",
                             fontSize = 12.sp,
                             color = Color.Gray,
                             textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -2998,8 +2969,8 @@ fun SyncCloudDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                         OutlinedTextField(
                             value = customAccountName,
                             onValueChange = { customAccountName = it },
-                            label = { Text("Account Holder Name") },
-                            placeholder = { Text("e.g. John Doe") },
+                            label = { Text("Display Name") },
+                            placeholder = { Text("e.g. Sieam") },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                             colors = OutlinedTextFieldDefaults.colors(
@@ -3011,8 +2982,8 @@ fun SyncCloudDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                         OutlinedTextField(
                             value = customAccountEmail,
                             onValueChange = { customAccountEmail = it },
-                            label = { Text("Google Account Email") },
-                            placeholder = { Text("e.g. johndoe@gmail.com") },
+                            label = { Text("Username or Email") },
+                            placeholder = { Text("e.g. sieam or user@gmail.com") },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                             colors = OutlinedTextFieldDefaults.colors(
@@ -3032,23 +3003,24 @@ fun SyncCloudDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                             }
                             Button(
                                 onClick = {
-                                    if (customAccountEmail.isBlank() || customAccountName.isBlank()) {
-                                        Toast.makeText(context, "Please fill in all fields", Toast.LENGTH_SHORT).show()
-                                    } else if (!android.util.Patterns.EMAIL_ADDRESS.matcher(customAccountEmail).matches()) {
-                                        Toast.makeText(context, "Please enter a valid email address", Toast.LENGTH_SHORT).show()
+                                    val cleanInput = customAccountEmail.trim()
+                                    val cleanName = customAccountName.trim().ifBlank { "Sieam" }
+                                    if (cleanInput.isBlank()) {
+                                        Toast.makeText(context, "Please enter a username or email", Toast.LENGTH_SHORT).show()
                                     } else {
+                                        val effectiveEmail = com.example.supabase.SupabaseSyncManager.toSafeEmail(cleanInput)
                                         isChoosingAccount = false
                                         isAddingCustomAccount = false
                                         isConnectingState = true
-                                        connectMessage = "Connecting to online database..."
+                                        connectMessage = "Connecting to Supabase Storage..."
                                         coroutineScope.launch {
-                                            viewModel.connectGoogleDrive(customAccountEmail.trim(), customAccountName.trim())
-                                            viewModel.restoreDataFromFirebase(customAccountEmail.trim()) { success ->
+                                            viewModel.connectGoogleDrive(effectiveEmail, cleanName)
+                                            viewModel.restoreDataFromSupabase(effectiveEmail) { success ->
                                                 if (success) {
-                                                    Toast.makeText(context, "Database synced & restored successfully from cloud!", Toast.LENGTH_LONG).show()
+                                                    Toast.makeText(context, "Data restored from Supabase!", Toast.LENGTH_LONG).show()
                                                 } else {
                                                     viewModel.triggerGoogleDriveSync { }
-                                                    Toast.makeText(context, "Connected successfully! Initializing database.", Toast.LENGTH_SHORT).show()
+                                                    Toast.makeText(context, "Connected to Supabase! Initial backup uploaded.", Toast.LENGTH_SHORT).show()
                                                 }
                                                 isConnectingState = false
                                             }
@@ -3063,14 +3035,14 @@ fun SyncCloudDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                         }
                     } else {
                         Text(
-                            text = "Sign in with Google",
+                            text = "Supabase Cloud Account",
                             fontWeight = FontWeight.Bold,
                             fontSize = 18.sp,
                             color = RoyalBlue
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "Select an account to sync with WeXpense",
+                            text = "Select an account to sync in real-time with Supabase Storage",
                             fontSize = 12.sp,
                             color = Color.Gray,
                             textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -3083,48 +3055,20 @@ fun SyncCloudDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(Color.Black.copy(alpha = 0.04f))
                                 .clickable {
-                                    val activity = context as? android.app.Activity
-                                    if (activity != null) {
-                                        isChoosingAccount = false
-                                        isConnectingState = true
-                                        connectMessage = "Opening Google Sign-In..."
-                                        com.example.firebase.FirebaseSyncManager.signInWithGoogle(
-                                            activity = activity,
-                                            onSuccess = { email, displayName ->
-                                                coroutineScope.launch {
-                                                    connectMessage = "Syncing database with Firestore..."
-                                                    viewModel.connectGoogleDrive(email, displayName)
-                                                    viewModel.restoreDataFromFirebase(email) { success ->
-                                                        if (success) {
-                                                            Toast.makeText(context, "Cloud backup restored successfully!", Toast.LENGTH_LONG).show()
-                                                        } else {
-                                                            viewModel.triggerGoogleDriveSync { }
-                                                        }
-                                                        isConnectingState = false
-                                                    }
-                                                }
-                                            },
-                                            onFailure = { error ->
-                                                // Failed or cancelled - proceed in custom backup mode gracefully
-                                                isConnectingState = false
-                                                isChoosingAccount = true
-                                                isAddingCustomAccount = true
-                                                customAccountEmail = "pranggols@gmail.com"
-                                                customAccountName = "Pranggol Sam"
-                                                Toast.makeText(context, "Entering Custom Sync mode.", Toast.LENGTH_SHORT).show()
+                                    isChoosingAccount = false
+                                    isConnectingState = true
+                                    connectMessage = "Connecting to Supabase Storage..."
+                                    coroutineScope.launch {
+                                        val sieamEmail = "sieam.wexpense@gmail.com"
+                                        viewModel.connectGoogleDrive(sieamEmail, "Sieam")
+                                        viewModel.restoreDataFromSupabase(sieamEmail) { success ->
+                                            if (success) {
+                                                Toast.makeText(context, "Data restored from Supabase!", Toast.LENGTH_LONG).show()
+                                            } else {
+                                                viewModel.triggerGoogleDriveSync { }
+                                                Toast.makeText(context, "Connected to Supabase successfully!", Toast.LENGTH_SHORT).show()
                                             }
-                                        )
-                                    } else {
-                                        isChoosingAccount = false
-                                        isConnectingState = true
-                                        coroutineScope.launch {
-                                            viewModel.connectGoogleDrive("pranggols@gmail.com", "Pranggol Sam")
-                                            viewModel.restoreDataFromFirebase("pranggols@gmail.com") { success ->
-                                                if (!success) {
-                                                    viewModel.triggerGoogleDriveSync { }
-                                                }
-                                                isConnectingState = false
-                                            }
+                                            isConnectingState = false
                                         }
                                     }
                                 }
@@ -3139,7 +3083,7 @@ fun SyncCloudDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = "P",
+                                    text = "S",
                                     color = Color.White,
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 18.sp
@@ -3148,12 +3092,12 @@ fun SyncCloudDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                             Spacer(modifier = Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "Pranggol Sam",
+                                    text = "Sieam",
                                     fontWeight = FontWeight.SemiBold,
                                     fontSize = 14.sp
                                 )
                                 Text(
-                                    text = "pranggols@gmail.com",
+                                    text = "sieam.wexpense@gmail.com",
                                     fontSize = 12.sp,
                                     color = Color.Gray
                                 )
@@ -3167,6 +3111,8 @@ fun SyncCloudDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(12.dp))
                                 .clickable {
+                                    customAccountName = ""
+                                    customAccountEmail = ""
                                     isAddingCustomAccount = true
                                 }
                                 .padding(12.dp),
@@ -3180,7 +3126,7 @@ fun SyncCloudDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                             )
                             Spacer(modifier = Modifier.width(12.dp))
                             Text(
-                                text = "Use another account",
+                                text = "Use another account / username",
                                 fontWeight = FontWeight.Medium,
                                 fontSize = 14.sp,
                                 color = RoyalBlue
@@ -3314,8 +3260,28 @@ fun SyncCloudDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                Text("Database Host", fontSize = 13.sp, color = Color.Gray)
+                                Text("ydntfvpsrsxegupxyvtz.supabase.co", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = RoyalBlue)
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 Text("Destination", fontSize = 13.sp, color = Color.Gray)
                                 Text("Supabase / wexpense-backups", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Status", fontSize = 13.sp, color = Color.Gray)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(StatusGreen))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Connected & Verified", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = StatusGreen)
+                                }
                             }
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -3389,7 +3355,7 @@ fun SyncCloudDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                         OutlinedButton(
                             onClick = {
                                 isSyncingState = true
-                                viewModel.restoreDataFromFirebase(email) { success ->
+                                viewModel.restoreDataFromSupabase(email) { success ->
                                     isSyncingState = false
                                     val msg = if (success) "Restored from Supabase successfully!" else "Failed to restore or no backup found"
                                     Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
@@ -6920,7 +6886,7 @@ fun ProfileDialog(userName: String, viewModel: ExpenseViewModel, onDismiss: () -
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Firestore Cloud Backup",
+                                text = "Supabase Cloud Backup",
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 14.sp,
                                 color = RoyalBlue

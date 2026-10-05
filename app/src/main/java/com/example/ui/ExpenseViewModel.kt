@@ -40,7 +40,8 @@ data class SettleInstruction(
 )
 
 class ExpenseViewModel(application: Application) : AndroidViewModel(application) {
-    private val repository: ExpenseRepository
+    private val database = ExpenseDatabase.getDatabase(application)
+    private val repository = ExpenseRepository(database.expenseDao())
     private val prefs = application.getSharedPreferences("wexpense_prefs", android.content.Context.MODE_PRIVATE)
 
     val selectedGroupId = MutableStateFlow<Long?>(null)
@@ -136,14 +137,44 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
         disconnectGoogleDrive()
     }
 
+    // Tab state (0: Expenses, 1: Balance, 2: Share, 3: Web Preview)
+    val activeTab = MutableStateFlow(0)
+
+    // Search and Sort states
+    val searchQuery = MutableStateFlow("")
+    val sortOption = MutableStateFlow("Date Desc") // "Date Desc", "Amount Desc", "Amount Asc", "Description Asc"
+    val showCategoryFilter = MutableStateFlow<String?>(null) // null for all
+
+    // Groups State
+    val allGroups: StateFlow<List<BillingGroup>> = repository.getAllGroups()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Selected Group Details
+    val selectedGroup: StateFlow<BillingGroup?> = combine(allGroups, selectedGroupId) { groups, id ->
+        groups.find { it.id == id }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
     init {
         com.example.supabase.SupabaseSyncManager.init(application)
-        val database = ExpenseDatabase.getDatabase(application)
-        repository = ExpenseRepository(database.expenseDao())
         
         // Prepopulate with high fidelity sandbox data if empty
         viewModelScope.launch {
             prepopulateIfEmpty()
+        }
+
+        // Automatically select the first or saved group whenever allGroups updates
+        viewModelScope.launch {
+            allGroups.collect { groups ->
+                if (groups.isNotEmpty()) {
+                    val currentId = selectedGroupId.value
+                    if (currentId == null || groups.none { it.id == currentId }) {
+                        val savedId = prefs.getLong("last_selected_group_id", -1L)
+                        val targetId = if (savedId != -1L && groups.any { it.id == savedId }) savedId else groups.first().id
+                        selectedGroupId.value = targetId
+                        prefs.edit().putLong("last_selected_group_id", targetId).apply()
+                    }
+                }
+            }
         }
 
         // Collect expenses based on selectedGroupId safely with job cancellation
@@ -163,23 +194,6 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
             }
         }
     }
-
-    // Tab state (0: Expenses, 1: Balance, 2: Share, 3: Web Preview)
-    val activeTab = MutableStateFlow(0)
-
-    // Search and Sort states
-    val searchQuery = MutableStateFlow("")
-    val sortOption = MutableStateFlow("Date Desc") // "Date Desc", "Amount Desc", "Amount Asc", "Description Asc"
-    val showCategoryFilter = MutableStateFlow<String?>(null) // null for all
-
-    // Groups State
-    val allGroups: StateFlow<List<BillingGroup>> = repository.getAllGroups()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    // Selected Group Details
-    val selectedGroup: StateFlow<BillingGroup?> = combine(allGroups, selectedGroupId) { groups, id ->
-        groups.find { it.id == id }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     // Filtered and Sorted Expenses
     val filteredExpenses: StateFlow<List<Expense>> = combine(
@@ -612,6 +626,7 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
                 val lastGroupId = groups.firstOrNull()?.id
                 if (lastGroupId != null) {
                     selectedGroupId.value = lastGroupId
+                    prefs.edit().putLong("last_selected_group_id", lastGroupId).apply()
                 }
                 return@withContext true
             }
@@ -630,7 +645,7 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
     val googleDriveAutoSync = MutableStateFlow(prefs.getBoolean("gdrive_autosync", true))
     val googleDriveLastSync = MutableStateFlow(prefs.getString("gdrive_lastsync", "Never") ?: "Never")
 
-    fun connectGoogleDrive(email: String, name: String = "Pranggol Sam") {
+    fun connectGoogleDrive(email: String, name: String = "Sieam") {
         prefs.edit()
             .putBoolean("gdrive_connected", true)
             .putString("gdrive_email", email)
@@ -641,18 +656,19 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
         googleDriveEmail.value = email
         googleDriveName.value = name
         googleDriveLastSync.value = "Never"
+        com.example.supabase.SupabaseSyncManager.saveAccount(email)
     }
 
     fun disconnectGoogleDrive() {
         prefs.edit()
             .putBoolean("gdrive_connected", false)
             .putString("gdrive_email", "")
-            .putString("gdrive_name", "Pranggol Sam")
+            .putString("gdrive_name", "Sieam")
             .putString("gdrive_lastsync", "Never")
             .apply()
         isGoogleDriveConnected.value = false
         googleDriveEmail.value = ""
-        googleDriveName.value = "Pranggol Sam"
+        googleDriveName.value = "Sieam"
         googleDriveLastSync.value = "Never"
     }
 
@@ -661,101 +677,137 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
         googleDriveAutoSync.value = enabled
     }
 
+    fun getEffectiveSyncEmail(): String {
+        val em = userEmail.value.trim()
+        if (em.isNotBlank() && em != "guest@wexpense.com") {
+            return com.example.supabase.SupabaseSyncManager.toSafeEmail(em)
+        }
+        val gd = googleDriveEmail.value.trim()
+        if (gd.isNotBlank()) {
+            return com.example.supabase.SupabaseSyncManager.toSafeEmail(gd)
+        }
+        return com.example.supabase.SupabaseSyncManager.getStoredAccountEmail()
+    }
+
     fun triggerGoogleDriveSync(onComplete: () -> Unit = {}) {
         viewModelScope.launch {
-            val email = if (userEmail.value.isNotBlank()) userEmail.value else googleDriveEmail.value
-            if (email.isNotBlank()) {
-                val currentGroups = allGroups.value
-                if (currentGroups.isEmpty()) {
-                    // Local DB is empty: do not overwrite cloud with empty data; restore from cloud instead!
-                    restoreDataFromFirebase(email) {
-                        onComplete()
-                    }
-                    return@launch
+            val email = getEffectiveSyncEmail()
+            val currentGroups = allGroups.value
+            if (currentGroups.isEmpty()) {
+                // Local DB is empty: do not overwrite cloud with empty data; restore from cloud instead!
+                restoreDataFromSupabase(email) {
+                    onComplete()
                 }
+                return@launch
+            }
 
-                val jsonData = exportBackupAsJsonString()
-                // Upload to Supabase (Primary Cloud Destination)
-                com.example.supabase.SupabaseSyncManager.uploadBackupToSupabase(email, jsonData) { supabaseSuccess ->
+            val jsonData = exportBackupAsJsonString()
+            // Upload directly and exclusively to Supabase Storage
+            com.example.supabase.SupabaseSyncManager.uploadBackupToSupabase(email, jsonData) { supabaseSuccess ->
+                if (supabaseSuccess) {
                     val sdf = java.text.SimpleDateFormat("yyyy-MM-dd hh:mm a", java.util.Locale.getDefault())
                     val formattedDate = sdf.format(java.util.Date())
                     prefs.edit().putString("gdrive_lastsync", formattedDate).apply()
                     googleDriveLastSync.value = formattedDate
-
-                    // Also attempt to upload to Firebase Firestore as secondary backup
-                    if (isGoogleDriveConnected.value) {
-                        com.example.firebase.FirebaseSyncManager.uploadDataToFirestore(getApplication(), email, jsonData) { _ ->
-                            onComplete()
-                        }
-                    } else {
-                        onComplete()
-                    }
                 }
-            } else {
-                kotlinx.coroutines.delay(500)
                 onComplete()
             }
         }
     }
 
-    fun triggerAutoFirebaseSync() {
-        val email = if (userEmail.value.isNotBlank()) userEmail.value else googleDriveEmail.value
-        if (email.isNotBlank() && allGroups.value.isNotEmpty()) {
-            viewModelScope.launch {
-                try {
-                    val jsonData = exportBackupAsJsonString()
-                    // Auto-sync to Supabase immediately upon any data modification
-                    com.example.supabase.SupabaseSyncManager.uploadBackupToSupabase(email, jsonData) { supabaseSuccess ->
+    fun triggerAutoSupabaseSync() {
+        if (!googleDriveAutoSync.value) return
+        val currentGroups = allGroups.value
+        if (currentGroups.isEmpty()) return
+
+        val email = getEffectiveSyncEmail()
+        viewModelScope.launch {
+            try {
+                val jsonData = exportBackupAsJsonString()
+                // Auto-sync immediately and exclusively to Supabase upon every update
+                com.example.supabase.SupabaseSyncManager.uploadBackupToSupabase(email, jsonData) { supabaseSuccess ->
+                    if (supabaseSuccess) {
                         val sdf = java.text.SimpleDateFormat("yyyy-MM-dd hh:mm a", java.util.Locale.getDefault())
                         val formattedDate = sdf.format(java.util.Date())
                         prefs.edit().putString("gdrive_lastsync", formattedDate).apply()
                         googleDriveLastSync.value = formattedDate
-
-                        // Backup sync as well to Firestore if connected
-                        if (isGoogleDriveConnected.value) {
-                            com.example.firebase.FirebaseSyncManager.uploadDataToFirestore(getApplication(), email, jsonData) { _ -> }
-                        }
                     }
-                } catch (e: Exception) {
-                    // Safe catch
                 }
+            } catch (e: Exception) {
+                android.util.Log.e("ExpenseViewModel", "Auto Supabase sync error: ${e.message}")
             }
         }
     }
 
-    fun restoreDataFromFirebase(email: String, onComplete: (Boolean) -> Unit) {
-        // Try restoring from Supabase (Primary Cloud Destination) first
-        com.example.supabase.SupabaseSyncManager.downloadBackupFromSupabase(email) { supabaseData ->
-            if (supabaseData != null) {
-                viewModelScope.launch {
-                    val success = importBackupFromJsonString(supabaseData)
-                    if (success) {
-                        val sdf = java.text.SimpleDateFormat("yyyy-MM-dd hh:mm a", java.util.Locale.getDefault())
-                        val formattedDate = sdf.format(java.util.Date())
-                        prefs.edit().putString("gdrive_lastsync", formattedDate).apply()
-                        googleDriveLastSync.value = formattedDate
-                    }
-                    onComplete(success)
+    fun triggerAutoFirebaseSync() {
+        triggerAutoSupabaseSync()
+    }
+
+    fun restoreDataFromSupabase(email: String = "", onComplete: (Boolean) -> Unit = {}) {
+        val targetEmail = if (email.isBlank()) getEffectiveSyncEmail() else email
+        // 1. First attempt to restore directly from Supabase Storage
+        com.example.supabase.SupabaseSyncManager.downloadBackupFromSupabase(targetEmail) { supabaseData ->
+            viewModelScope.launch {
+                var restored = false
+                if (!supabaseData.isNullOrBlank()) {
+                    restored = importBackupFromJsonString(supabaseData)
                 }
-            } else {
-                // Fallback to Firestore if not found on Supabase
-                com.example.firebase.FirebaseSyncManager.downloadDataFromFirestore(getApplication(), email) { jsonData ->
-                    if (jsonData != null) {
-                        viewModelScope.launch {
-                            val success = importBackupFromJsonString(jsonData)
-                            if (success) {
+
+                if (restored) {
+                    val sdf = java.text.SimpleDateFormat("yyyy-MM-dd hh:mm a", java.util.Locale.getDefault())
+                    val formattedDate = sdf.format(java.util.Date())
+                    prefs.edit().putString("gdrive_lastsync", formattedDate).apply()
+                    googleDriveLastSync.value = formattedDate
+                    onComplete(true)
+                } else {
+                    // 2. If Supabase has no groups, check Firestore for previous backup to migrate into Supabase!
+                    val candidateEmails = listOf(targetEmail, "sieam.wexpense@gmail.com", "pranggols@gmail.com").distinct()
+                    tryFirestoreMigration(candidateEmails, 0) { migrated, jsonData ->
+                        if (migrated && !jsonData.isNullOrBlank()) {
+                            // Immediately persist this recovered data to Supabase Storage!
+                            com.example.supabase.SupabaseSyncManager.uploadBackupToSupabase(targetEmail, jsonData) { _ ->
                                 val sdf = java.text.SimpleDateFormat("yyyy-MM-dd hh:mm a", java.util.Locale.getDefault())
                                 val formattedDate = sdf.format(java.util.Date())
                                 prefs.edit().putString("gdrive_lastsync", formattedDate).apply()
                                 googleDriveLastSync.value = formattedDate
                             }
-                            onComplete(success)
+                            onComplete(true)
+                        } else {
+                            onComplete(false)
                         }
-                    } else {
-                        onComplete(false)
                     }
                 }
             }
         }
+    }
+
+    private fun tryFirestoreMigration(
+        emails: List<String>,
+        index: Int,
+        onDone: (Boolean, String?) -> Unit
+    ) {
+        if (index >= emails.size) {
+            onDone(false, null)
+            return
+        }
+        val currentEmail = emails[index]
+        com.example.firebase.FirebaseSyncManager.downloadDataFromFirestore(getApplication(), currentEmail) { jsonData ->
+            if (!jsonData.isNullOrBlank()) {
+                viewModelScope.launch {
+                    val success = importBackupFromJsonString(jsonData)
+                    if (success) {
+                        onDone(true, jsonData)
+                    } else {
+                        tryFirestoreMigration(emails, index + 1, onDone)
+                    }
+                }
+            } else {
+                tryFirestoreMigration(emails, index + 1, onDone)
+            }
+        }
+    }
+
+    fun restoreDataFromFirebase(email: String = "", onComplete: (Boolean) -> Unit = {}) {
+        restoreDataFromSupabase(email, onComplete)
     }
 }
