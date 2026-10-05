@@ -34,8 +34,6 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.13'
 
       - name: Extract App Version
         id: version_info
@@ -51,7 +49,16 @@ jobs:
           echo "Extracted Version: v$VERSION_NAME (Code: $VERSION_CODE)"
 
       - name: Build Debug APK
-        run: gradle assembleDebug --stacktrace
+        run: |
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            ./gradlew assembleDebug --stacktrace
+          elif command -v gradle &> /dev/null; then
+            gradle assembleDebug --stacktrace
+          else
+            echo "Gradle not found directly, using gradle/actions/setup-gradle..."
+            gradle assembleDebug --stacktrace
+          fi
 
       - name: Prepare Release Artifacts
         run: |
