@@ -1,6 +1,7 @@
 package com.example.supabase
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.util.Log
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
@@ -15,10 +16,41 @@ object SupabaseSyncManager {
 
     const val SUPABASE_URL = "https://ydntfvpsrsxegupxyvtz.supabase.co"
     const val SUPABASE_PUBLISHABLE_KEY = "sb_publishable_zoHyPI-t9Dpu2L17qUoewA_aIL82GBX"
-    const val SUPABASE_SECRET_KEY = "sb_secret_qfB44dMdt40fGPIqD_YsJA_vIBI2xMU"
     const val BUCKET_NAME = "wexpense-backups"
 
     private val client = OkHttpClient()
+    private var prefs: SharedPreferences? = null
+
+    @Volatile private var currentAccessToken: String? = null
+    @Volatile private var currentRefreshToken: String? = null
+    @Volatile private var storedUsername: String? = null
+    @Volatile private var storedPassword: String? = null
+
+    fun init(context: Context) {
+        if (prefs == null) {
+            prefs = context.applicationContext.getSharedPreferences("supabase_sync_prefs", Context.MODE_PRIVATE)
+            currentAccessToken = prefs?.getString("access_token", null)
+            currentRefreshToken = prefs?.getString("refresh_token", null)
+            storedUsername = prefs?.getString("username", null)
+            storedPassword = prefs?.getString("password", null)
+            Log.d(TAG, "SupabaseSyncManager initialized. Has token: ${!currentAccessToken.isNullOrBlank()}")
+        }
+    }
+
+    private fun saveSession(token: String?, refresh: String?, username: String? = null, password: String? = null) {
+        currentAccessToken = token
+        currentRefreshToken = refresh
+        if (username != null) storedUsername = username
+        if (password != null) storedPassword = password
+
+        prefs?.edit()?.apply {
+            putString("access_token", token)
+            putString("refresh_token", refresh)
+            if (username != null) putString("username", username)
+            if (password != null) putString("password", password)
+            apply()
+        }
+    }
 
     /**
      * Helper to safely format any username or email into a compliant format that Supabase accepts.
@@ -37,7 +69,6 @@ object SupabaseSyncManager {
 
     /**
      * Registers a new user with a Username and Password on Supabase.
-     * Maps the username to a standard valid pseudo-email (e.g. username.wexpense@gmail.com)
      */
     fun registerWithSupabase(
         username: String,
@@ -76,6 +107,14 @@ object SupabaseSyncManager {
                 response.use { resp ->
                     val bodyString = resp.body?.string() ?: ""
                     if (resp.isSuccessful) {
+                        try {
+                            val json = JSONObject(bodyString)
+                            val token = json.optString("access_token", null)
+                            val refresh = json.optString("refresh_token", null)
+                            saveSession(token, refresh, username, password)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Could not parse session on signup: ${e.message}")
+                        }
                         Log.i(TAG, "Supabase signup successful for username: $username")
                         onResult(true, "Account created successfully!")
                     } else {
@@ -129,6 +168,15 @@ object SupabaseSyncManager {
                 response.use { resp ->
                     val bodyString = resp.body?.string() ?: ""
                     if (resp.isSuccessful) {
+                        try {
+                            val json = JSONObject(bodyString)
+                            val token = json.optString("access_token", null)
+                            val refresh = json.optString("refresh_token", null)
+                            saveSession(token, refresh, username, password)
+                            Log.i(TAG, "Supabase session stored with token length: ${token?.length ?: 0}")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Could not parse session on login: ${e.message}")
+                        }
                         Log.i(TAG, "Supabase login successful for username: $username")
                         onResult(true, "Login successful!")
                     } else {
@@ -147,93 +195,87 @@ object SupabaseSyncManager {
     }
 
     /**
-     * Ensures that the backup storage bucket exists on Supabase.
-     * If not, attempts to create it programmatically using the service key.
+     * Re-authenticates silently if we have stored credentials to refresh the token.
      */
-    private fun ensureBucketExists() {
-        val url = "$SUPABASE_URL/storage/v1/bucket"
-        
-        // JSON body to create a public bucket
-        val jsonBody = """
-            {
-              "id": "$BUCKET_NAME",
-              "name": "$BUCKET_NAME",
-              "public": true,
-              "file_size_limit": 52428800,
-              "allowed_mime_types": ["application/json"]
+    private fun reAuthenticateSilently(onDone: (Boolean) -> Unit) {
+        val u = storedUsername
+        val p = storedPassword
+        if (!u.isNullOrBlank() && !p.isNullOrBlank()) {
+            loginWithSupabase(u, p) { success, _ ->
+                onDone(success)
             }
-        """.trimIndent()
-
-        val requestBody = jsonBody.toRequestBody("application/json".toMediaTypeOrNull())
-
-        val request = Request.Builder()
-            .url(url)
-            .addHeader("apikey", SUPABASE_SECRET_KEY)
-            .addHeader("Authorization", "Bearer $SUPABASE_SECRET_KEY")
-            .post(requestBody)
-            .build()
-
-        client.newCall(request).enqueue(object : okhttp3.Callback {
-            override fun onFailure(call: okhttp3.Call, e: IOException) {
-                Log.e(TAG, "Failed to ensure bucket exists: ${e.localizedMessage}")
-            }
-
-            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
-                response.use { resp ->
-                    val code = resp.code
-                    if (code == 201 || code == 200) {
-                        Log.i(TAG, "Storage bucket '$BUCKET_NAME' verified/created successfully.")
-                    } else if (code == 409) {
-                        Log.i(TAG, "Storage bucket '$BUCKET_NAME' already exists.")
-                    } else {
-                        Log.w(TAG, "Unexpected response from bucket creation: $code - ${resp.body?.string()}")
-                    }
-                }
-            }
-        })
+        } else {
+            onDone(false)
+        }
     }
 
     /**
      * Uploads the backup JSON data to the Supabase Storage Bucket.
-     * Uses upsert to overwrite any existing backup file for this user.
+     * Uses upsert to overwrite the user's existing backup file and immediately update
+     * the 'Last modified' timestamp in the Supabase Dashboard.
      */
     fun uploadBackupToSupabase(
         email: String,
         jsonData: String,
         onComplete: (Boolean) -> Unit
     ) {
-        // Ensure bucket is ready first asynchronously
-        ensureBucketExists()
-
         val normalizedEmail = if (!email.contains("@")) toSafeEmail(email) else email
         val safeEmail = normalizedEmail.replace("@", "_at_").replace(".", "_dot_")
         val filename = "${safeEmail}_backup.json"
         val url = "$SUPABASE_URL/storage/v1/object/$BUCKET_NAME/$filename"
 
+        uploadWithRetry(url, filename, normalizedEmail, jsonData, isRetry = false, onComplete = onComplete)
+    }
+
+    private fun uploadWithRetry(
+        url: String,
+        filename: String,
+        email: String,
+        jsonData: String,
+        isRetry: Boolean,
+        onComplete: (Boolean) -> Unit
+    ) {
         val requestBody = jsonData.toByteArray(Charsets.UTF_8).toRequestBody("application/json".toMediaTypeOrNull())
 
-        // Supabase Storage uses POST with x-upsert header to overwrite/upload
-        val request = Request.Builder()
+        val token = currentAccessToken
+        val requestBuilder = Request.Builder()
             .url(url)
-            .addHeader("apikey", SUPABASE_SECRET_KEY)
-            .addHeader("Authorization", "Bearer $SUPABASE_SECRET_KEY")
+            .addHeader("apikey", SUPABASE_PUBLISHABLE_KEY)
             .addHeader("x-upsert", "true")
-            .post(requestBody)
-            .build()
+            .addHeader("Content-Type", "application/json")
+
+        if (!token.isNullOrBlank()) {
+            requestBuilder.addHeader("Authorization", "Bearer $token")
+        }
+
+        val request = requestBuilder.post(requestBody).build()
 
         client.newCall(request).enqueue(object : okhttp3.Callback {
             override fun onFailure(call: okhttp3.Call, e: IOException) {
-                Log.e(TAG, "Supabase upload failed: ${e.localizedMessage}")
+                Log.e(TAG, "Supabase upload network failure: ${e.localizedMessage}")
                 onComplete(false)
             }
 
             override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                 response.use { resp ->
+                    val code = resp.code
+                    val body = resp.body?.string() ?: ""
+
                     if (resp.isSuccessful) {
-                        Log.i(TAG, "Supabase backup uploaded successfully for: $normalizedEmail")
+                        Log.i(TAG, "✅ Supabase backup uploaded & modified timestamp updated for: $filename")
                         onComplete(true)
+                    } else if ((code == 401 || code == 403) && !isRetry && !storedUsername.isNullOrBlank()) {
+                        Log.w(TAG, "Supabase upload returned $code ($body). Attempting silent re-auth and retry...")
+                        reAuthenticateSilently { authSuccess ->
+                            if (authSuccess) {
+                                uploadWithRetry(url, filename, email, jsonData, isRetry = true, onComplete)
+                            } else {
+                                Log.e(TAG, "Silent re-auth failed, upload rejected: $body")
+                                onComplete(false)
+                            }
+                        }
                     } else {
-                        Log.e(TAG, "Supabase upload failed with code: ${resp.code} - ${resp.body?.string()}")
+                        Log.e(TAG, "❌ Supabase upload failed with code: $code - $body")
                         onComplete(false)
                     }
                 }
@@ -302,3 +344,4 @@ object SupabaseSyncManager {
         })
     }
 }
+

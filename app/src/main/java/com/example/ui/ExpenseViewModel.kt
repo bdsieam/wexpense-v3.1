@@ -137,6 +137,7 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
     }
 
     init {
+        com.example.supabase.SupabaseSyncManager.init(application)
         val database = ExpenseDatabase.getDatabase(application)
         repository = ExpenseRepository(database.expenseDao())
         
@@ -662,8 +663,8 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
 
     fun triggerGoogleDriveSync(onComplete: () -> Unit = {}) {
         viewModelScope.launch {
-            val email = googleDriveEmail.value
-            if (isGoogleDriveConnected.value && email.isNotBlank()) {
+            val email = if (userEmail.value.isNotBlank()) userEmail.value else googleDriveEmail.value
+            if (email.isNotBlank()) {
                 val currentGroups = allGroups.value
                 if (currentGroups.isEmpty()) {
                     // Local DB is empty: do not overwrite cloud with empty data; restore from cloud instead!
@@ -676,44 +677,47 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
                 val jsonData = exportBackupAsJsonString()
                 // Upload to Supabase (Primary Cloud Destination)
                 com.example.supabase.SupabaseSyncManager.uploadBackupToSupabase(email, jsonData) { supabaseSuccess ->
+                    val sdf = java.text.SimpleDateFormat("yyyy-MM-dd hh:mm a", java.util.Locale.getDefault())
+                    val formattedDate = sdf.format(java.util.Date())
+                    prefs.edit().putString("gdrive_lastsync", formattedDate).apply()
+                    googleDriveLastSync.value = formattedDate
+
                     // Also attempt to upload to Firebase Firestore as secondary backup
-                    com.example.firebase.FirebaseSyncManager.uploadDataToFirestore(getApplication(), email, jsonData) { firestoreSuccess ->
-                        val sdf = java.text.SimpleDateFormat("yyyy-MM-dd hh:mm a", java.util.Locale.getDefault())
-                        val formattedDate = sdf.format(java.util.Date())
-                        prefs.edit().putString("gdrive_lastsync", formattedDate).apply()
-                        googleDriveLastSync.value = formattedDate
+                    if (isGoogleDriveConnected.value) {
+                        com.example.firebase.FirebaseSyncManager.uploadDataToFirestore(getApplication(), email, jsonData) { _ ->
+                            onComplete()
+                        }
+                    } else {
                         onComplete()
                     }
                 }
             } else {
-                kotlinx.coroutines.delay(1000)
+                kotlinx.coroutines.delay(500)
                 onComplete()
             }
         }
     }
 
     fun triggerAutoFirebaseSync() {
-        if (isGoogleDriveConnected.value && googleDriveAutoSync.value) {
-            val email = googleDriveEmail.value
-            if (email.isNotBlank() && allGroups.value.isNotEmpty()) {
-                viewModelScope.launch {
-                    try {
-                        val jsonData = exportBackupAsJsonString()
-                        // Auto-sync to Supabase
-                        com.example.supabase.SupabaseSyncManager.uploadBackupToSupabase(email, jsonData) { supabaseSuccess ->
-                            // Backup sync as well to Firestore
-                            com.example.firebase.FirebaseSyncManager.uploadDataToFirestore(getApplication(), email, jsonData) { firestoreSuccess ->
-                                if (supabaseSuccess || firestoreSuccess) {
-                                    val sdf = java.text.SimpleDateFormat("yyyy-MM-dd hh:mm a", java.util.Locale.getDefault())
-                                    val formattedDate = sdf.format(java.util.Date())
-                                    prefs.edit().putString("gdrive_lastsync", formattedDate).apply()
-                                    googleDriveLastSync.value = formattedDate
-                                }
-                            }
+        val email = if (userEmail.value.isNotBlank()) userEmail.value else googleDriveEmail.value
+        if (email.isNotBlank() && allGroups.value.isNotEmpty()) {
+            viewModelScope.launch {
+                try {
+                    val jsonData = exportBackupAsJsonString()
+                    // Auto-sync to Supabase immediately upon any data modification
+                    com.example.supabase.SupabaseSyncManager.uploadBackupToSupabase(email, jsonData) { supabaseSuccess ->
+                        val sdf = java.text.SimpleDateFormat("yyyy-MM-dd hh:mm a", java.util.Locale.getDefault())
+                        val formattedDate = sdf.format(java.util.Date())
+                        prefs.edit().putString("gdrive_lastsync", formattedDate).apply()
+                        googleDriveLastSync.value = formattedDate
+
+                        // Backup sync as well to Firestore if connected
+                        if (isGoogleDriveConnected.value) {
+                            com.example.firebase.FirebaseSyncManager.uploadDataToFirestore(getApplication(), email, jsonData) { _ -> }
                         }
-                    } catch (e: Exception) {
-                        // Safe catch
                     }
+                } catch (e: Exception) {
+                    // Safe catch
                 }
             }
         }
