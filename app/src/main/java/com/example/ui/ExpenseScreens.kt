@@ -3561,7 +3561,7 @@ fun ExportPDFDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(130.dp)
+                        .heightIn(min = 130.dp, max = 150.dp)
                         .border(1.dp, Color.LightGray, RoundedCornerShape(8.dp))
                         .background(Color.White)
                         .padding(12.dp)
@@ -3572,7 +3572,7 @@ fun ExportPDFDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                             Text("PREVIEW", fontSize = 8.sp, color = Color.Gray, fontWeight = FontWeight.Bold)
                         }
                         Text("Billing Period: ${group?.name}", fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                        Text("Type: ${if (exportFormatIsPdf) "High-Definition PDF" else "Standard JPEG"}", fontSize = 8.sp, color = Color.Gray)
+                        Text("Format: ${if (exportFormatIsPdf) "Multi-Page PDF (Full Summary Included)" else "Dynamic Long JPG (Full Summary Included)"}", fontSize = 8.sp, color = RoyalBlue)
                         Spacer(modifier = Modifier.height(4.dp))
                         
                         Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Color.LightGray))
@@ -3581,21 +3581,25 @@ fun ExportPDFDialog(viewModel: ExpenseViewModel, onDismiss: () -> Unit) {
                         Text("Total Statement Value: ${formatAmount(filteredTotal)}", fontSize = 10.sp, fontWeight = FontWeight.Bold)
                         Spacer(modifier = Modifier.height(4.dp))
                         
-                        // Small table representation
+                        // Scrollable full participant summary representation
                         val displayBalances = if (selectedParticipantFilter == "All") {
                             balances
                         } else {
                             balances.filter { it.name in selectedMembers }
                         }
 
-                        displayBalances.take(2).forEach { b ->
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text(b.name, fontSize = 9.sp)
-                                Text("Paid: ${formatAmount(b.paid)} | Due: ${formatAmount(b.balance)}", fontSize = 8.sp)
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 55.dp)
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            displayBalances.forEach { b ->
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text(b.name, fontSize = 9.sp, fontWeight = FontWeight.Medium)
+                                    Text("Paid: ${formatAmount(b.paid)} | Due: ${formatAmount(b.balance)}", fontSize = 8.sp, color = if (b.balance >= 0) StatusGreen else StatusRed)
+                                }
                             }
-                        }
-                        if (displayBalances.size > 2) {
-                            Text("... and ${displayBalances.size - 2} others", fontSize = 8.sp, color = Color.Gray)
                         }
                     }
                 }
@@ -4025,10 +4029,6 @@ fun drawReportOnCanvas(
     
     // Draw Rows
     filteredTableExpenses.forEach { exp ->
-        if (currentY > 780f) {
-            // Break early or keep on single page compactly
-        }
-
         canvas.drawLine(tableLeft, currentY, tableRight, currentY, borderPaint)
         
         var x = tableLeft
@@ -4113,7 +4113,7 @@ fun drawReportOnCanvas(
     }
 
     // Draw Signature Logo
-    val footerY = 810f
+    val footerY = maxOf(currentY + 30f, 810f)
     val logoTextPaint = android.graphics.Paint().apply {
         isAntiAlias = true
         color = android.graphics.Color.parseColor("#1A3B8B")
@@ -4141,7 +4141,513 @@ fun drawReportOnCanvas(
     canvas.drawText(tagline, tableRight - logoSubTextPaint.measureText(tagline), footerY + 10f, logoSubTextPaint)
 }
 
-// Generate a High-Fidelity Real PDF Document matching the visual style perfectly
+// Helper to calculate exact required height for full dynamic JPG rendering without truncation
+fun calculateReportCanvasHeight(
+    expensesCount: Int,
+    balancesCount: Int,
+    showChart: Boolean,
+    hasChartData: Boolean,
+    showSummary: Boolean
+): Float {
+    val topY = if (showChart && hasChartData) 210f else 115f
+    val txHeaderHeight = 35f
+    val txRowsHeight = expensesCount * 20f
+    val totalRowHeight = 35f
+    val summaryHeight = if (showSummary) (45f + (balancesCount * 18f) + 15f) else 0f
+    val footerHeight = 65f
+    val padding = 30f
+    val calculated = topY + txHeaderHeight + txRowsHeight + totalRowHeight + summaryHeight + footerHeight + padding
+    return maxOf(842f, calculated)
+}
+
+// Generate a High-Fidelity Real Multi-Page PDF Document ensuring all transactions and full summary fit perfectly
+fun generateReportPdfDocument(
+    group: BillingGroup?,
+    expenses: List<Expense>,
+    balances: List<com.example.ui.ParticipantBalance>,
+    selectedParticipant: String,
+    showChart: Boolean,
+    showWhoPaid: Boolean,
+    showWhen: Boolean,
+    showInvolves: Boolean,
+    showSummary: Boolean
+): android.graphics.pdf.PdfDocument {
+    val pdfDocument = android.graphics.pdf.PdfDocument()
+    
+    val selectedList = if (selectedParticipant == "All" || selectedParticipant == "All Participants") {
+        null
+    } else if (selectedParticipant == "None") {
+        emptyList<String>()
+    } else {
+        selectedParticipant.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+    }
+
+    val groupName = group?.name ?: "July 2026"
+    val pdfTitle = if (selectedList == null) {
+        groupName
+    } else if (selectedList.isEmpty()) {
+        "$groupName - No Participants"
+    } else {
+        "$groupName - ${selectedList.joinToString(", ")}"
+    }
+
+    val createdDateStr = group?.let {
+        SimpleDateFormat("dd-MMM-yyyy", Locale.US).format(Date(it.createdEpochMillis))
+    } ?: "22-Jul-2026"
+    val createdStr = "Created on $createdDateStr"
+
+    // Chart Balances
+    val chartBalances = if (showChart) {
+        if (selectedList == null) {
+            balances.filter { it.paid > 0.0 }
+        } else {
+            balances.filter { it.name in selectedList && it.paid > 0.0 }
+        }
+    } else {
+        emptyList()
+    }
+    val hasChart = showChart && chartBalances.isNotEmpty()
+
+    // Filter expenses based on selected participant
+    val filteredTableExpenses = if (selectedList == null) {
+        expenses
+    } else {
+        expenses.filter { exp ->
+            exp.paidBy in selectedList ||
+            exp.splits.any { it.participantName in selectedList && it.isInvolved } ||
+            (exp.splits.isEmpty() && exp.isAllParticipants && group?.members?.any { it in selectedList } == true)
+        }
+    }
+
+    val filteredBalances = if (selectedList == null) {
+        balances
+    } else {
+        balances.filter { it.name in selectedList }
+    }
+
+    // Determine Columns to show in Main Table
+    val columns = mutableListOf<String>()
+    if (showWhoPaid) columns.add("Who Paid?")
+    columns.add("For what reasons?")
+    columns.add("How Much?")
+    if (showWhen) columns.add("When?")
+    if (showInvolves) columns.add("Involves?")
+
+    val colCount = columns.size
+    val tableLeft = 40f
+    val tableWidth = 515f
+    val tableRight = tableLeft + tableWidth
+    val maxContentY = 780f
+    val footerY = 812f
+
+    // Calculate column X positions
+    val colWidths = FloatArray(colCount)
+    var totalWeight = 0f
+    columns.forEach { col ->
+        totalWeight += when (col) {
+            "Who Paid?" -> 1.0f
+            "For what reasons?" -> 1.5f
+            "How Much?" -> 1.0f
+            "When?" -> 1.0f
+            "Involves?" -> 1.2f
+            else -> 1.0f
+        }
+    }
+    columns.forEachIndexed { i, col ->
+        val weight = when (col) {
+            "Who Paid?" -> 1.0f
+            "For what reasons?" -> 1.5f
+            "How Much?" -> 1.0f
+            "When?" -> 1.0f
+            "Involves?" -> 1.2f
+            else -> 1.0f
+        }
+        colWidths[i] = (weight / totalWeight) * tableWidth
+    }
+
+    // Paints
+    val paint = android.graphics.Paint().apply { isAntiAlias = true }
+    val titlePaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.parseColor("#1A3B8B")
+        textSize = 22f
+        typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+    }
+    val subtitlePaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.parseColor("#74777F")
+        textSize = 10f
+        typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.NORMAL)
+    }
+    val bodyPaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.parseColor("#1A1C1E")
+        textSize = 8.5f
+        typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.NORMAL)
+    }
+    val boldBodyPaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.parseColor("#1A1C1E")
+        textSize = 8.5f
+        typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+    }
+    val tableHeaderPaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.parseColor("#1A3B8B")
+        textSize = 9f
+        typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+    }
+    val borderPaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.parseColor("#E1E2EC")
+        style = android.graphics.Paint.Style.STROKE
+        strokeWidth = 1f
+    }
+    val fillHeaderPaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.parseColor("#F1F3F9")
+        style = android.graphics.Paint.Style.FILL
+    }
+    val pageNumberPaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.parseColor("#74777F")
+        textSize = 8.5f
+    }
+    val logoTextPaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.parseColor("#1A3B8B")
+        textSize = 13f
+        typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+    }
+    val logoSubTextPaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.parseColor("#74777F")
+        textSize = 7f
+        typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.ITALIC)
+    }
+    val countPaint = android.graphics.Paint(logoTextPaint).apply {
+        color = android.graphics.Color.parseColor("#1A1C1E")
+    }
+
+    val colors = listOf(
+        android.graphics.Color.parseColor("#1A3B8B"),
+        android.graphics.Color.parseColor("#FF5722"),
+        android.graphics.Color.parseColor("#388E3C"),
+        android.graphics.Color.parseColor("#1976D2"),
+        android.graphics.Color.parseColor("#9C27B0"),
+        android.graphics.Color.parseColor("#00BCD4")
+    )
+
+    val formatter = java.text.DecimalFormat("#,##0.00")
+    val allMembers = group?.members ?: emptyList()
+
+    fun drawPageFooter(canvas: android.graphics.Canvas, pageIndex: Int, totalPages: Int) {
+        val pageStr = "Page $pageIndex of $totalPages"
+        canvas.drawText(pageStr, tableLeft, footerY, pageNumberPaint)
+        
+        val expText = "exp"
+        val countText = "count"
+        val logoX = tableRight - logoTextPaint.measureText(expText + countText)
+        canvas.drawText(expText, logoX, footerY, logoTextPaint)
+        canvas.drawText(countText, logoX + logoTextPaint.measureText(expText), footerY, countPaint)
+        val tagline = "manage expenses better ever..."
+        canvas.drawText(tagline, tableRight - logoSubTextPaint.measureText(tagline), footerY + 10f, logoSubTextPaint)
+    }
+
+    fun drawTableHeader(canvas: android.graphics.Canvas, startY: Float, title: String) {
+        canvas.drawText(title, tableLeft, startY - 8f, boldBodyPaint.apply { textSize = 11f })
+        canvas.drawRect(tableLeft, startY, tableRight, startY + 24f, fillHeaderPaint)
+        canvas.drawRect(tableLeft, startY, tableRight, startY + 24f, borderPaint)
+        
+        var colX = tableLeft
+        columns.forEachIndexed { i, col ->
+            canvas.drawText(col, colX + 8f, startY + 16f, tableHeaderPaint)
+            colX += colWidths[i]
+        }
+    }
+
+    fun drawTransactionRow(canvas: android.graphics.Canvas, exp: Expense, y: Float) {
+        canvas.drawLine(tableLeft, y, tableRight, y, borderPaint)
+        var x = tableLeft
+        columns.forEachIndexed { i, col ->
+            val text = when (col) {
+                "Who Paid?" -> exp.paidBy
+                "For what reasons?" -> exp.description
+                "How Much?" -> "${formatter.format(exp.amount)} ৳"
+                "When?" -> SimpleDateFormat("dd-MMM-yyyy", Locale.US).format(Date(exp.dateEpochMillis))
+                "Involves?" -> getInvolvesText(exp, allMembers)
+                else -> ""
+            }
+            val paintToUse = if (col == "How Much?") boldBodyPaint.apply { textSize = 8.5f } else bodyPaint.apply { textSize = 8.5f }
+            val maxWidth = colWidths[i] - 12f
+            var truncatedText = text
+            if (paintToUse.measureText(text) > maxWidth) {
+                var len = text.length
+                while (len > 0 && paintToUse.measureText(text.substring(0, len) + "...") > maxWidth) {
+                    len--
+                }
+                truncatedText = if (len > 0) text.substring(0, len) + "..." else "..."
+            }
+            canvas.drawText(truncatedText, x + 8f, y + 14f, paintToUse)
+            x += colWidths[i]
+        }
+    }
+
+    fun drawSummaryTable(canvas: android.graphics.Canvas, startY: Float): Float {
+        var curY = startY
+        canvas.drawText("Summary", tableLeft, curY - 8f, boldBodyPaint.apply { textSize = 11f })
+        
+        val summaryCols = listOf("Participants", "Charged", "Paid", "Due")
+        val sumColWidth = tableWidth / 4f
+        
+        canvas.drawRect(tableLeft, curY, tableRight, curY + 20f, fillHeaderPaint)
+        canvas.drawRect(tableLeft, curY, tableRight, curY + 20f, borderPaint)
+        
+        var sx = tableLeft
+        summaryCols.forEach { col ->
+            canvas.drawText(col, sx + 8f, curY + 13f, tableHeaderPaint)
+            sx += sumColWidth
+        }
+        
+        curY += 20f
+        
+        filteredBalances.forEach { b ->
+            canvas.drawLine(tableLeft, curY, tableRight, curY, borderPaint)
+            
+            canvas.drawText(b.name, tableLeft + 8f, curY + 13f, bodyPaint.apply { textSize = 8.5f })
+            canvas.drawText("${formatter.format(b.charged)} ৳", tableLeft + sumColWidth + 8f, curY + 13f, bodyPaint)
+            canvas.drawText("${formatter.format(b.paid)} ৳", tableLeft + (sumColWidth * 2f) + 8f, curY + 13f, bodyPaint)
+            
+            val duePaint = android.graphics.Paint(bodyPaint).apply {
+                color = if (b.balance >= 0) android.graphics.Color.parseColor("#388E3C") else android.graphics.Color.parseColor("#D32F2F")
+                typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+                textSize = 8.5f
+            }
+            canvas.drawText("${formatter.format(b.balance)} ৳", tableLeft + (sumColWidth * 3f) + 8f, curY + 13f, duePaint)
+            
+            curY += 18f
+        }
+        canvas.drawLine(tableLeft, curY, tableRight, curY, borderPaint)
+        return curY
+    }
+
+    // Pre-calculate Total Pages dynamically
+    val summaryNeededHeight = if (showSummary) (45f + filteredBalances.size * 18f) else 0f
+    val totalRowHeight = 35f
+    val page1StartY = if (hasChart) 200f else 110f
+    val page1Avail = maxContentY - (page1StartY + 24f)
+    val totalExpensesCount = filteredTableExpenses.size
+
+    val totalPages = run {
+        if ((totalExpensesCount * 20f) + totalRowHeight + summaryNeededHeight <= page1Avail) {
+            1
+        } else {
+            val countP1 = ((page1Avail - 10f) / 20f).toInt().coerceAtLeast(1).coerceAtMost(totalExpensesCount)
+            var remN = totalExpensesCount - countP1
+            var pCount = 1
+            var sumDrawn = false
+            while (remN > 0 || (showSummary && !sumDrawn)) {
+                pCount++
+                val availNext = maxContentY - (85f + 24f)
+                if (remN > 0) {
+                    if ((remN * 20f) + totalRowHeight + summaryNeededHeight <= availNext) {
+                        remN = 0
+                        sumDrawn = true
+                    } else if ((remN * 20f) + totalRowHeight <= availNext) {
+                        remN = 0
+                    } else {
+                        val countThisP = ((availNext - 10f) / 20f).toInt().coerceAtLeast(1).coerceAtMost(remN)
+                        remN -= countThisP
+                    }
+                } else if (showSummary && !sumDrawn) {
+                    sumDrawn = true
+                }
+            }
+            maxOf(1, pCount)
+        }
+    }
+
+    // PAGE 1
+    var currentPageNumber = 1
+    var pageInfo = android.graphics.pdf.PdfDocument.PageInfo.Builder(595, 842, currentPageNumber).create()
+    var page = pdfDocument.startPage(pageInfo)
+    var canvas = page.canvas
+
+    canvas.drawText(pdfTitle, 40f, 60f, titlePaint)
+    canvas.drawText(createdStr, 40f, 78f, subtitlePaint)
+
+    // Draw Pie Chart on Page 1 if present
+    if (hasChart) {
+        val totalPaid = chartBalances.sumOf { it.paid }
+        val chartBoxLeft = 320f
+        val chartBoxTop = 40f
+        val chartBoxRight = 555f
+        val chartBoxBottom = 180f
+        
+        paint.color = android.graphics.Color.WHITE
+        paint.style = android.graphics.Paint.Style.FILL
+        canvas.drawRoundRect(android.graphics.RectF(chartBoxLeft, chartBoxTop, chartBoxRight, chartBoxBottom), 12f, 12f, paint)
+        canvas.drawRoundRect(android.graphics.RectF(chartBoxLeft, chartBoxTop, chartBoxRight, chartBoxBottom), 12f, 12f, borderPaint)
+        
+        val chartTitlePaint = android.graphics.Paint().apply {
+            isAntiAlias = true
+            color = android.graphics.Color.parseColor("#1A3B8B")
+            textSize = 9f
+            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+        }
+        canvas.drawText("Participant wise expense ratio", chartBoxLeft + 15f, chartBoxTop + 20f, chartTitlePaint)
+        
+        val rectF = android.graphics.RectF(340f, 65f, 420f, 145f)
+        var startAngle = 0f
+        chartBalances.forEachIndexed { index, b ->
+            val sweepAngle = ((b.paid / totalPaid) * 360f).toFloat()
+            paint.color = colors[index % colors.size]
+            paint.style = android.graphics.Paint.Style.FILL
+            canvas.drawArc(rectF, startAngle, sweepAngle, true, paint)
+            
+            paint.color = android.graphics.Color.WHITE
+            paint.style = android.graphics.Paint.Style.STROKE
+            paint.strokeWidth = 1.5f
+            canvas.drawArc(rectF, startAngle, sweepAngle, true, paint)
+            
+            startAngle += sweepAngle
+        }
+        
+        val legendTextPaint = android.graphics.Paint().apply {
+            isAntiAlias = true
+            color = android.graphics.Color.parseColor("#1A1C1E")
+            textSize = 8f
+            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.NORMAL)
+        }
+        var legendY = chartBoxTop + 45f
+        chartBalances.forEachIndexed { index, b ->
+            if (legendY < chartBoxBottom - 10f) {
+                paint.color = colors[index % colors.size]
+                paint.style = android.graphics.Paint.Style.FILL
+                canvas.drawCircle(440f, legendY - 3f, 4f, paint)
+                
+                val pct = (b.paid / totalPaid) * 100
+                val legendText = "${b.name}: ${String.format(Locale.US, "%.1f%%", pct)}"
+                canvas.drawText(legendText, 450f, legendY, legendTextPaint)
+                legendY += 15f
+            }
+        }
+    }
+
+    var currentY = page1StartY
+    drawTableHeader(canvas, currentY, "Itemized Transactions")
+    currentY += 24f
+
+    var expenseIdx = 0
+    var summaryDrawn = false
+
+    if (totalPages == 1) {
+        // Everything fits on Page 1!
+        filteredTableExpenses.forEach { exp ->
+            drawTransactionRow(canvas, exp, currentY)
+            currentY += 20f
+        }
+        canvas.drawLine(tableLeft, currentY, tableRight, currentY, borderPaint)
+
+        val sumAmount = filteredTableExpenses.sumOf { it.amount }
+        val totalStr = "Total : ${formatter.format(sumAmount)} ৳"
+        canvas.drawText(totalStr, tableRight - boldBodyPaint.apply { textSize = 10f }.measureText(totalStr) - 10f, currentY + 16f, boldBodyPaint)
+        currentY += 35f
+
+        if (showSummary) {
+            drawSummaryTable(canvas, currentY)
+            summaryDrawn = true
+        }
+        drawPageFooter(canvas, 1, 1)
+        pdfDocument.finishPage(page)
+    } else {
+        // Multi-page mode!
+        val countP1 = ((page1Avail - 10f) / 20f).toInt().coerceAtLeast(1).coerceAtMost(totalExpensesCount)
+        for (i in 0 until countP1) {
+            drawTransactionRow(canvas, filteredTableExpenses[i], currentY)
+            currentY += 20f
+        }
+        canvas.drawLine(tableLeft, currentY, tableRight, currentY, borderPaint)
+        expenseIdx = countP1
+
+        drawPageFooter(canvas, 1, totalPages)
+        pdfDocument.finishPage(page)
+
+        // Subsequent pages
+        while (expenseIdx < totalExpensesCount || (showSummary && !summaryDrawn)) {
+            currentPageNumber++
+            pageInfo = android.graphics.pdf.PdfDocument.PageInfo.Builder(595, 842, currentPageNumber).create()
+            page = pdfDocument.startPage(pageInfo)
+            canvas = page.canvas
+
+            val contTitlePaint = android.graphics.Paint(titlePaint).apply { textSize = 14f }
+            canvas.drawText("$pdfTitle (Continued)", tableLeft, 48f, contTitlePaint)
+            canvas.drawText("Statement details • Created on $createdDateStr", tableLeft, 64f, subtitlePaint)
+            currentY = 85f
+
+            if (expenseIdx < totalExpensesCount) {
+                drawTableHeader(canvas, currentY, "Itemized Transactions (Contd.)")
+                currentY += 24f
+
+                val remainingCount = totalExpensesCount - expenseIdx
+                val availSpace = maxContentY - currentY
+
+                if ((remainingCount * 20f) + totalRowHeight + summaryNeededHeight <= availSpace) {
+                    // Remaining transactions AND total row AND full summary all fit on this page!
+                    for (i in expenseIdx until totalExpensesCount) {
+                        drawTransactionRow(canvas, filteredTableExpenses[i], currentY)
+                        currentY += 20f
+                    }
+                    expenseIdx = totalExpensesCount
+                    canvas.drawLine(tableLeft, currentY, tableRight, currentY, borderPaint)
+
+                    val sumAmount = filteredTableExpenses.sumOf { it.amount }
+                    val totalStr = "Total : ${formatter.format(sumAmount)} ৳"
+                    canvas.drawText(totalStr, tableRight - boldBodyPaint.apply { textSize = 10f }.measureText(totalStr) - 10f, currentY + 16f, boldBodyPaint)
+                    currentY += 35f
+
+                    if (showSummary) {
+                        drawSummaryTable(canvas, currentY)
+                        summaryDrawn = true
+                    }
+                } else if ((remainingCount * 20f) + totalRowHeight <= availSpace) {
+                    // All remaining transactions fit and total row fits, but summary goes to next page
+                    for (i in expenseIdx until totalExpensesCount) {
+                        drawTransactionRow(canvas, filteredTableExpenses[i], currentY)
+                        currentY += 20f
+                    }
+                    expenseIdx = totalExpensesCount
+                    canvas.drawLine(tableLeft, currentY, tableRight, currentY, borderPaint)
+
+                    val sumAmount = filteredTableExpenses.sumOf { it.amount }
+                    val totalStr = "Total : ${formatter.format(sumAmount)} ৳"
+                    canvas.drawText(totalStr, tableRight - boldBodyPaint.apply { textSize = 10f }.measureText(totalStr) - 10f, currentY + 16f, boldBodyPaint)
+                } else {
+                    // Only partial remaining transactions fit on this page
+                    val rowsThisPage = ((availSpace - 10f) / 20f).toInt().coerceAtLeast(1).coerceAtMost(remainingCount)
+                    for (i in expenseIdx until (expenseIdx + rowsThisPage)) {
+                        drawTransactionRow(canvas, filteredTableExpenses[i], currentY)
+                        currentY += 20f
+                    }
+                    expenseIdx += rowsThisPage
+                    canvas.drawLine(tableLeft, currentY, tableRight, currentY, borderPaint)
+                }
+            } else if (showSummary && !summaryDrawn) {
+                // Standalone Summary page!
+                currentY += 10f
+                drawSummaryTable(canvas, currentY)
+                summaryDrawn = true
+            }
+
+            drawPageFooter(canvas, currentPageNumber, totalPages)
+            pdfDocument.finishPage(page)
+        }
+    }
+
+    return pdfDocument
+}
+
+// Generate a High-Fidelity Multi-Page PDF Document and save to Downloads folder
 fun generateAndSaveReportPdf(
     context: android.content.Context,
     group: BillingGroup?,
@@ -4154,17 +4660,10 @@ fun generateAndSaveReportPdf(
     showInvolves: Boolean,
     showSummary: Boolean
 ): android.net.Uri? {
-    val pdfDocument = android.graphics.pdf.PdfDocument()
-    val pageInfo = android.graphics.pdf.PdfDocument.PageInfo.Builder(595, 842, 1).create()
-    val page = pdfDocument.startPage(pageInfo)
-    val canvas = page.canvas
-    
-    drawReportOnCanvas(
-        canvas, group, expenses, balances, selectedParticipant,
+    val pdfDocument = generateReportPdfDocument(
+        group, expenses, balances, selectedParticipant,
         showChart, showWhoPaid, showWhen, showInvolves, showSummary
     )
-    
-    pdfDocument.finishPage(page)
     val groupName = group?.name ?: "July_2026"
     val filename = "${groupName.replace(" ", "_")}_Statement.pdf"
     val uri = savePdfToDownloads(context, pdfDocument, filename)
@@ -4172,6 +4671,7 @@ fun generateAndSaveReportPdf(
     return uri
 }
 
+// Generate a High-Fidelity Dynamic-Height JPG Image (so full summary & all transactions fit seamlessly)
 fun generateAndSaveReportJpg(
     context: android.content.Context,
     group: BillingGroup?,
@@ -4184,9 +4684,37 @@ fun generateAndSaveReportJpg(
     showInvolves: Boolean,
     showSummary: Boolean
 ): android.net.Uri? {
-    val scale = 3.0f
+    val selectedList = if (selectedParticipant == "All" || selectedParticipant == "All Participants") {
+        null
+    } else if (selectedParticipant == "None") {
+        emptyList<String>()
+    } else {
+        selectedParticipant.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+    }
+    val filteredTableExpenses = if (selectedList == null) {
+        expenses
+    } else {
+        expenses.filter { exp ->
+            exp.paidBy in selectedList ||
+            exp.splits.any { it.participantName in selectedList && it.isInvolved } ||
+            (exp.splits.isEmpty() && exp.isAllParticipants && group?.members?.any { it in selectedList } == true)
+        }
+    }
+    val filteredBalances = if (selectedList == null) balances else balances.filter { it.name in selectedList }
+    val chartBalances = if (showChart) {
+        if (selectedList == null) balances.filter { it.paid > 0.0 } else balances.filter { it.name in selectedList && it.paid > 0.0 }
+    } else emptyList()
+
+    val totalHeight = calculateReportCanvasHeight(
+        expensesCount = filteredTableExpenses.size,
+        balancesCount = filteredBalances.size,
+        showChart = showChart,
+        hasChartData = chartBalances.isNotEmpty(),
+        showSummary = showSummary
+    )
+    val scale = 2.5f
     val width = (595 * scale).toInt()
-    val height = (842 * scale).toInt()
+    val height = (totalHeight * scale).toInt()
     val bitmap = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(bitmap)
     
@@ -4204,6 +4732,7 @@ fun generateAndSaveReportJpg(
     return uri
 }
 
+// Generate Multi-Page PDF and save to internal cache for direct sharing/previewing
 fun generateAndCacheReportPdf(
     context: android.content.Context,
     group: BillingGroup?,
@@ -4216,17 +4745,10 @@ fun generateAndCacheReportPdf(
     showInvolves: Boolean,
     showSummary: Boolean
 ): android.net.Uri? {
-    val pdfDocument = android.graphics.pdf.PdfDocument()
-    val pageInfo = android.graphics.pdf.PdfDocument.PageInfo.Builder(595, 842, 1).create()
-    val page = pdfDocument.startPage(pageInfo)
-    val canvas = page.canvas
-    
-    drawReportOnCanvas(
-        canvas, group, expenses, balances, selectedParticipant,
+    val pdfDocument = generateReportPdfDocument(
+        group, expenses, balances, selectedParticipant,
         showChart, showWhoPaid, showWhen, showInvolves, showSummary
     )
-    
-    pdfDocument.finishPage(page)
     val groupName = group?.name ?: "July_2026"
     val filename = "${groupName.replace(" ", "_")}_Statement.pdf"
     val uri = savePdfToCache(context, pdfDocument, filename)
@@ -4234,6 +4756,7 @@ fun generateAndCacheReportPdf(
     return uri
 }
 
+// Generate Dynamic-Height JPG and save to internal cache for direct sharing
 fun generateAndCacheReportJpg(
     context: android.content.Context,
     group: BillingGroup?,
@@ -4246,9 +4769,37 @@ fun generateAndCacheReportJpg(
     showInvolves: Boolean,
     showSummary: Boolean
 ): android.net.Uri? {
-    val scale = 3.0f
+    val selectedList = if (selectedParticipant == "All" || selectedParticipant == "All Participants") {
+        null
+    } else if (selectedParticipant == "None") {
+        emptyList<String>()
+    } else {
+        selectedParticipant.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+    }
+    val filteredTableExpenses = if (selectedList == null) {
+        expenses
+    } else {
+        expenses.filter { exp ->
+            exp.paidBy in selectedList ||
+            exp.splits.any { it.participantName in selectedList && it.isInvolved } ||
+            (exp.splits.isEmpty() && exp.isAllParticipants && group?.members?.any { it in selectedList } == true)
+        }
+    }
+    val filteredBalances = if (selectedList == null) balances else balances.filter { it.name in selectedList }
+    val chartBalances = if (showChart) {
+        if (selectedList == null) balances.filter { it.paid > 0.0 } else balances.filter { it.name in selectedList && it.paid > 0.0 }
+    } else emptyList()
+
+    val totalHeight = calculateReportCanvasHeight(
+        expensesCount = filteredTableExpenses.size,
+        balancesCount = filteredBalances.size,
+        showChart = showChart,
+        hasChartData = chartBalances.isNotEmpty(),
+        showSummary = showSummary
+    )
+    val scale = 2.5f
     val width = (595 * scale).toInt()
-    val height = (842 * scale).toInt()
+    val height = (totalHeight * scale).toInt()
     val bitmap = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(bitmap)
     
@@ -4943,28 +5494,24 @@ fun WebReportPreviewScreen(viewModel: ExpenseViewModel) {
             ) {
                 Button(
                     onClick = {
-                        if (lastGeneratedPdfUri != null) {
-                            openReportPdf(context, lastGeneratedPdfUri!!)
+                        // Always generate a fresh multi-page PDF matching current filters & toggles
+                        val uri = generateAndCacheReportPdf(
+                            context,
+                            group,
+                            expenses,
+                            balances,
+                            selectedParticipantFilter,
+                            showChart,
+                            showWhoPaid,
+                            showWhen,
+                            showInvolves,
+                            showSummary
+                        )
+                        if (uri != null) {
+                            lastGeneratedPdfUri = uri
+                            openReportPdf(context, uri)
                         } else {
-                            // Direct preview by generating the PDF and immediately opening it!
-                            val uri = generateAndSaveReportPdf(
-                                context,
-                                group,
-                                expenses,
-                                balances,
-                                selectedParticipantFilter,
-                                showChart,
-                                showWhoPaid,
-                                showWhen,
-                                showInvolves,
-                                showSummary
-                            )
-                            if (uri != null) {
-                                lastGeneratedPdfUri = uri
-                                openReportPdf(context, uri)
-                            } else {
-                                Toast.makeText(context, "Error launching preview PDF.", Toast.LENGTH_SHORT).show()
-                            }
+                            Toast.makeText(context, "Error launching preview PDF.", Toast.LENGTH_SHORT).show()
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5BC0DE)),
