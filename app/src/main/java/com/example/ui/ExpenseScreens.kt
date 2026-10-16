@@ -196,9 +196,9 @@ fun MainExpenseAppScreen(
     val currentAppVersion = remember {
         try {
             val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
-            pInfo.versionName ?: "3.2"
+            pInfo.versionName ?: "3.3"
         } catch (e: Exception) {
-            "3.2"
+            "3.3"
         }
     }
 
@@ -660,27 +660,13 @@ fun MainExpenseAppScreen(
                                 fontSize = 20.sp
                             )
                         } else {
-                            Column(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable { scope.launch { drawerState.open() } }
-                                    .padding(vertical = 2.dp)
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = selectedGroup?.name ?: "WeXpense",
-                                        fontWeight = FontWeight.Bold,
-                                        color = RoyalBlue,
-                                        fontSize = 20.sp
-                                    )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Icon(
-                                        imageVector = Icons.Default.KeyboardArrowDown,
-                                        contentDescription = "Switch Group",
-                                        tint = RoyalBlue,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
+                            Column {
+                                Text(
+                                    text = selectedGroup?.name ?: "WeXpense",
+                                    fontWeight = FontWeight.Bold,
+                                    color = RoyalBlue,
+                                    fontSize = 20.sp
+                                )
                                 selectedGroup?.let {
                                     Text(
                                         text = "Group: ${it.description.takeIf { d -> d.isNotBlank() } ?: "Apartment 4B"}",
@@ -5992,9 +5978,9 @@ fun AboutDeveloperScreen(viewModel: ExpenseViewModel) {
                 val versionName = remember {
                     try {
                         val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
-                        pInfo.versionName ?: "3.2"
+                        pInfo.versionName ?: "3.3"
                     } catch (e: Exception) {
-                        "3.2"
+                        "3.3"
                     }
                 }
 
