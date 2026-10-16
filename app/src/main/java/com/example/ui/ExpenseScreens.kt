@@ -660,13 +660,27 @@ fun MainExpenseAppScreen(
                                 fontSize = 20.sp
                             )
                         } else {
-                            Column {
-                                Text(
-                                    text = selectedGroup?.name ?: "WeXpense",
-                                    fontWeight = FontWeight.Bold,
-                                    color = RoyalBlue,
-                                    fontSize = 20.sp
-                                )
+                            Column(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { scope.launch { drawerState.open() } }
+                                    .padding(vertical = 2.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = selectedGroup?.name ?: "WeXpense",
+                                        fontWeight = FontWeight.Bold,
+                                        color = RoyalBlue,
+                                        fontSize = 20.sp
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Icon(
+                                        imageVector = Icons.Default.KeyboardArrowDown,
+                                        contentDescription = "Switch Group",
+                                        tint = RoyalBlue,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
                                 selectedGroup?.let {
                                     Text(
                                         text = "Group: ${it.description.takeIf { d -> d.isNotBlank() } ?: "Apartment 4B"}",

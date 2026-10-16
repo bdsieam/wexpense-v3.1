@@ -46,7 +46,9 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
     private val repository = ExpenseRepository(database.expenseDao())
     private val prefs = application.getSharedPreferences("wexpense_prefs", android.content.Context.MODE_PRIVATE)
 
-    val selectedGroupId = MutableStateFlow<Long?>(null)
+    val selectedGroupId = MutableStateFlow<Long?>(
+        prefs.getLong("last_selected_group_id", -1L).takeIf { it != -1L }
+    )
     val userName = MutableStateFlow(prefs.getString("user_name", "") ?: "")
     val isLoggedIn = MutableStateFlow(prefs.getBoolean("is_logged_in", prefs.getString("user_name", "")?.isNotBlank() == true))
     val loginType = MutableStateFlow(prefs.getString("login_type", if (prefs.getString("user_name", "")?.isNotBlank() == true) "guest" else "") ?: "")
@@ -281,16 +283,20 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
     init {
         com.example.supabase.SupabaseSyncManager.init(application)
 
-        // Automatically select the first or saved group whenever allGroups updates
+        // Automatically select the last visited or first group whenever allGroups updates
         viewModelScope.launch {
             allGroups.collect { groups ->
                 if (groups.isNotEmpty()) {
+                    val savedId = prefs.getLong("last_selected_group_id", -1L)
                     val currentId = selectedGroupId.value
-                    if (currentId == null || groups.none { it.id == currentId }) {
-                        val savedId = prefs.getLong("last_selected_group_id", -1L)
-                        val targetId = if (savedId != -1L && groups.any { it.id == savedId }) savedId else groups.first().id
-                        selectedGroupId.value = targetId
-                        prefs.edit().putLong("last_selected_group_id", targetId).apply()
+                    if (savedId != -1L && groups.any { it.id == savedId }) {
+                        if (currentId != savedId) {
+                            selectedGroupId.value = savedId
+                        }
+                    } else if (currentId == null || groups.none { it.id == currentId }) {
+                        val fallbackId = groups.first().id
+                        selectedGroupId.value = fallbackId
+                        prefs.edit().putLong("last_selected_group_id", fallbackId).apply()
                     }
                 }
             }
@@ -369,10 +375,8 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
                 members = members
             )
             val newId = repository.insertGroup(group)
-            if (selectedGroupId.value == null) {
-                selectedGroupId.value = newId
-                prefs.edit().putLong("last_selected_group_id", newId).apply()
-            }
+            selectedGroupId.value = newId
+            prefs.edit().putLong("last_selected_group_id", newId).apply()
             triggerAutoSupabaseSync()
         }
     }
@@ -641,11 +645,10 @@ class ExpenseViewModel(application: Application) : AndroidViewModel(application)
             if (groups.isNotEmpty()) {
                 repository.restoreDatabaseBackup(groups, expenses)
                 
-                val lastGroupId = groups.firstOrNull()?.id
-                if (lastGroupId != null) {
-                    selectedGroupId.value = lastGroupId
-                    prefs.edit().putLong("last_selected_group_id", lastGroupId).apply()
-                }
+                val savedId = prefs.getLong("last_selected_group_id", -1L)
+                val targetId = if (savedId != -1L && groups.any { it.id == savedId }) savedId else groups.first().id
+                selectedGroupId.value = targetId
+                prefs.edit().putLong("last_selected_group_id", targetId).apply()
                 return@withContext true
             }
             return@withContext false
