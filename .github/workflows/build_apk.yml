@@ -26,11 +26,14 @@ jobs:
         run: |
           if [ -f debug.keystore.base64 ]; then
             base64 -d debug.keystore.base64 > debug.keystore
-            echo "Keystore restored successfully from base64"
-          elif [ ! -f debug.keystore ]; then
-            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-            echo "Generated fallback debug.keystore"
+            echo "Keystore restored successfully from debug.keystore.base64"
+          else
+            echo "Restoring embedded fixed keystore..."
+            echo "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" | base64 -d > debug.keystore
           fi
+          # Ensure debug.keystore is present at both root and app/
+          cp debug.keystore app/debug.keystore 2>/dev/null || true
+          echo "Fixed keystore ready."
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -41,7 +44,7 @@ jobs:
           VERSION_NAME=$(grep -E 'versionName\s*=\s*' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
           VERSION_CODE=$(grep -E 'versionCode\s*=\s*' app/build.gradle.kts | head -n 1 | sed -E 's/.*=\s*([0-9]+).*/\1/')
           if [ -z "$VERSION_NAME" ]; then
-            VERSION_NAME="3.2"
+            VERSION_NAME="3.3"
           fi
           echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_ENV
           echo "VERSION_CODE=$VERSION_CODE" >> $GITHUB_ENV
@@ -52,12 +55,12 @@ jobs:
         run: |
           if [ -f "./gradlew" ]; then
             chmod +x ./gradlew
-            ./gradlew assembleDebug --stacktrace
+            ./gradlew assembleDebug -Pandroid.injected.testOnly=false --stacktrace
           elif command -v gradle &> /dev/null; then
-            gradle assembleDebug --stacktrace
+            gradle assembleDebug -Pandroid.injected.testOnly=false --stacktrace
           else
             echo "Gradle not found directly, using gradle/actions/setup-gradle..."
-            gradle assembleDebug --stacktrace
+            gradle assembleDebug -Pandroid.injected.testOnly=false --stacktrace
           fi
 
       - name: Prepare Release Artifacts
